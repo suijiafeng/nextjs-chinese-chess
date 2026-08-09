@@ -100,8 +100,18 @@ button { color: inherit; }
 .palace::after { transform: rotate(-48deg); }
 .palace-top { top: 0; }
 .palace-bottom { bottom: 0; }
-.piece-grid { display: grid; grid-template-columns: repeat(9, 1fr); grid-template-rows: repeat(10, 1fr); z-index: 2; }
-.point { appearance: none; position: relative; border: 0; background: transparent; padding: 0; min-width: 0; cursor: default; }
+.piece-grid { z-index: 2; }
+.point {
+  appearance: none;
+  position: absolute;
+  width: 12.5%;
+  height: calc(100% / 9);
+  transform: translate(-50%, -50%);
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: default;
+}
 .piece { cursor: pointer; }
 .point:focus-visible { outline: 2px solid rgba(255, 250, 236, .95); outline-offset: -4px; border-radius: 50%; }
 .point.target { cursor: pointer; }

@@ -345,6 +345,8 @@ export default function Home() {
               <div className="piece-grid" role="grid" aria-label={`${turn === "red" ? "红方" : "黑方"}回合`}>
                 {viewCoordinates.map(([r, c]) => {
                   const piece = board[r][c];
+                  const visualRow = flipped ? 9 - r : r;
+                  const visualCol = flipped ? 8 - c : c;
                   const isTarget = targets.some(([tr, tc]) => tr === r && tc === c);
                   const isSelected = sameCoord(selected, r, c);
                   const isFrom = sameCoord(lastMove?.from ?? null, r, c);
@@ -371,6 +373,10 @@ export default function Home() {
                       type="button"
                       role="gridcell"
                       data-point={`${r}-${c}`}
+                      style={{
+                        left: `${visualCol * 12.5}%`,
+                        top: `${visualRow * (100 / 9)}%`,
+                      }}
                       aria-label={label}
                       aria-pressed={isSelected}
                       onClick={() => choosePoint(r, c)}
