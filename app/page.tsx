@@ -16,7 +16,7 @@ import type { KeyboardEvent } from "react";
 
 type Coord = [number, number];
 type GameMode = "ai" | "local";
-type SoundKind = "move" | "capture" | "check" | "win";
+type SoundKind = "move" | "capture" | "check" | "win" | "lose";
 
 interface MoveRecord {
   before: Board;
@@ -80,6 +80,7 @@ export default function Home() {
   const [soundOn, setSoundOn] = useState(true);
   const [aiThinking, setAiThinking] = useState(false);
   const [result, setResult] = useState<GameResult | null>(null);
+  const [resultDismissed, setResultDismissed] = useState(false);
   const [times, setTimes] = useState({ red: 900, black: 900 });
   const audioRef = useRef<AudioContext | null>(null);
 
@@ -90,22 +91,68 @@ export default function Home() {
     try {
       const context = audioRef.current ?? new AudioContext();
       audioRef.current = context;
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-      const frequencies: Record<SoundKind, number> = {
-        move: 240,
-        capture: 170,
-        check: 390,
-        win: 520,
+      if (context.state === "suspended") void context.resume();
+
+      const strike = (
+        offset: number,
+        frequency: number,
+        duration: number,
+        volume: number,
+        type: OscillatorType = "triangle",
+      ) => {
+        const start = context.currentTime + offset;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, start);
+        oscillator.frequency.exponentialRampToValueAtTime(Math.max(55, frequency * 0.72), start + duration);
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(volume, start + 0.008);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(start);
+        oscillator.stop(start + duration + 0.02);
       };
-      oscillator.type = kind === "capture" ? "triangle" : "sine";
-      oscillator.frequency.setValueAtTime(frequencies[kind], context.currentTime);
-      gain.gain.setValueAtTime(0.0001, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.012);
-      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.16);
-      oscillator.connect(gain).connect(context.destination);
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.17);
+
+      const woodTap = (volume = 0.13) => {
+        const length = Math.floor(context.sampleRate * 0.055);
+        const buffer = context.createBuffer(1, length, context.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let index = 0; index < length; index++) {
+          const decay = Math.pow(1 - index / length, 4);
+          data[index] = (Math.random() * 2 - 1) * decay;
+        }
+        const source = context.createBufferSource();
+        const filter = context.createBiquadFilter();
+        const gain = context.createGain();
+        filter.type = "bandpass";
+        filter.frequency.value = 520;
+        filter.Q.value = 0.8;
+        gain.gain.value = volume;
+        source.buffer = buffer;
+        source.connect(filter).connect(gain).connect(context.destination);
+        source.start();
+      };
+
+      if (kind === "move") {
+        woodTap();
+        strike(0, 155, 0.09, 0.08);
+      } else if (kind === "capture") {
+        woodTap(0.17);
+        strike(0, 135, 0.12, 0.12, "square");
+        strike(0.075, 92, 0.16, 0.08);
+      } else if (kind === "check") {
+        woodTap(0.12);
+        strike(0, 260, 0.13, 0.09);
+        strike(0.14, 390, 0.22, 0.12, "sine");
+      } else {
+        const notes = kind === "win"
+          ? [330, 440, 550, 660]
+          : [330, 247, 185, 123];
+        notes.forEach((frequency, index) => {
+          strike(index * 0.15, frequency, index === notes.length - 1 ? 0.48 : 0.24, 0.09, "sine");
+        });
+      }
     } catch {
       // 声音不可用不影响对局本身。
     }
@@ -120,6 +167,7 @@ export default function Home() {
     setHistory([]);
     setLastMove(null);
     setResult(null);
+    setResultDismissed(false);
     setAiThinking(false);
     setTimes({ red: 900, black: 900 });
   }, [mode]);
@@ -173,10 +221,12 @@ export default function Home() {
     setTargets([]);
     setTurn(nextTurn);
     setResult(gameResult);
+    if (gameResult) setResultDismissed(false);
 
-    if (gameResult) playSound("win");
-    else if (gaveCheck) playSound("check");
-    else playSound(captured ? "capture" : "move");
+    if (!gameResult) {
+      if (gaveCheck) playSound("check");
+      else playSound(captured ? "capture" : "move");
+    }
     return true;
   }, [board, playSound, times.black, times.red, turn]);
 
@@ -195,8 +245,14 @@ export default function Home() {
     if (result || times[turn] > 0) return;
     const winner: Side = turn === "red" ? "black" : "red";
     setResult({ winner, message: `${turn === "red" ? "红方" : "黑方"}用时耗尽` });
-    playSound("win");
-  }, [playSound, result, times, turn]);
+    setResultDismissed(false);
+  }, [result, times, turn]);
+
+  useEffect(() => {
+    if (!result) return;
+    const lostToComputer = mode === "ai" && result.winner === "black";
+    playSound(lostToComputer ? "lose" : "win");
+  }, [mode, playSound, result]);
 
   useEffect(() => {
     if (mode !== "ai" || turn !== "black" || result) return;
@@ -264,6 +320,7 @@ export default function Home() {
     setSelected(null);
     setTargets([]);
     setResult(null);
+    setResultDismissed(false);
   };
 
   const viewCoordinates = useMemo(() => {
@@ -309,6 +366,12 @@ export default function Home() {
         : `${turn === "red" ? "红方" : "黑方"}行棋`;
   const statusNote = result?.message
     ?? (aiThinking ? "请稍候，对手正在推演棋路" : selected ? `可走 ${targets.length} 处` : "请选择一枚棋子");
+  const lostToComputer = mode === "ai" && result?.winner === "black";
+  const outcomeTitle = lostToComputer
+    ? "此局惜败"
+    : mode === "ai"
+      ? "你赢了"
+      : `${result?.winner === "red" ? "红方" : "黑方"}胜`;
 
   return (
     <main className="game-shell">
@@ -440,6 +503,24 @@ export default function Home() {
         </aside>
       </section>
       <footer>落子无悔，静候知音</footer>
+
+      {result && !resultDismissed ? (
+        <div className={`result-overlay ${lostToComputer ? "outcome-lose" : "outcome-win"}`} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
+          <div className="outcome-particles" aria-hidden="true">
+            {Array.from({ length: 12 }, (_, index) => <span key={index} />)}
+          </div>
+          <div className="outcome-card">
+            <div className="outcome-seal" aria-hidden="true"><span>{lostToComputer ? "敗" : "勝"}</span></div>
+            <small>{lostToComputer ? "胜败乃兵家常事" : "妙手定乾坤"}</small>
+            <h2 id="outcome-title">{outcomeTitle}</h2>
+            <p>{result.message}</p>
+            <div className="outcome-actions">
+              <button type="button" onClick={() => startNewGame()} autoFocus>再来一局</button>
+              <button type="button" onClick={() => setResultDismissed(true)}>复盘棋局</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
