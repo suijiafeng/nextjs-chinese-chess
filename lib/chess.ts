@@ -11,6 +11,27 @@ export type PieceType = 'K' | 'A' | 'B' | 'N' | 'R' | 'C' | 'P';
 export interface Piece { side: Side; t: PieceType }
 export type Board = (Piece | null)[][];
 
+export interface ChaseCandidate {
+  target: [number, number];
+  targetType: PieceType;
+  prohibited: boolean;
+}
+
+export interface AdjudicationMove {
+  mover: Piece;
+  from: [number, number];
+  to: [number, number];
+  captured: Piece | null;
+  check: boolean;
+  positionKey: string;
+  chaseCandidates: ChaseCandidate[];
+}
+
+export interface AdjudicationResult {
+  winner: Side | null;
+  message: string;
+}
+
 export function initialBoard(): Board {
   const b: Board = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
   const back: PieceType[] = ['R', 'N', 'B', 'A', 'K', 'A', 'B', 'N', 'R'];
@@ -28,6 +49,11 @@ export function initialBoard(): Board {
 }
 
 export const cloneBoard = (b: Board): Board => b.map((row) => row.map((p) => (p ? { ...p } : null)));
+
+/** 相同棋子分布与行棋方构成同一局面。 */
+export function positionKey(board: Board, turn: Side): string {
+  return `${turn[0]}:${board.flat().map((piece) => piece ? `${piece.side[0]}${piece.t}` : "--").join("")}`;
+}
 
 const inBoard = (r: number, c: number) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
 const inPalace = (r: number, c: number, side: Side) =>
@@ -159,6 +185,111 @@ export function hasAnyMove(board: Board, side: Side): boolean {
       if (p && p.side === side && legalMoves(board, r, c).length) return true;
     }
   return false;
+}
+
+function hasRealRoot(board: Board, attacker: Piece, from: [number, number], target: [number, number]): boolean {
+  const [fr, fc] = from;
+  const [tr, tc] = target;
+  const afterCapture = cloneBoard(board);
+  afterCapture[tr][tc] = { ...attacker };
+  afterCapture[fr][fc] = null;
+  const defender = attacker.side === "red" ? "black" : "red";
+
+  for (let r = 0; r < ROWS; r++)
+    for (let c = 0; c < COLS; c++) {
+      const piece = afterCapture[r][c];
+      if (piece?.side === defender && legalMoves(afterCapture, r, c).some(([mr, mc]) => mr === tr && mc === tc)) {
+        return true;
+      }
+    }
+  return false;
+}
+
+/**
+ * 只标记能够明确裁定的“捉”：行棋子下一着可合法吃到的非将帅棋子。
+ * 有真根、同类相捉、将帅/兵卒参与及未过河兵卒均按规则排除自动判负。
+ */
+export function chaseCandidates(board: Board, moverAt: [number, number], gaveCheck: boolean): ChaseCandidate[] {
+  if (gaveCheck) return [];
+  const [r, c] = moverAt;
+  const mover = board[r][c];
+  if (!mover) return [];
+
+  return legalMoves(board, r, c).flatMap(([tr, tc]) => {
+    const target = board[tr][tc];
+    if (!target || target.side === mover.side || target.t === "K") return [];
+    const pawnNotCrossed = target.t === "P" && (target.side === "red" ? tr >= 5 : tr <= 4);
+    const rooted = hasRealRoot(board, mover, [r, c], [tr, tc]);
+    const protectedRookException = rooted && target.t === "R" && (mover.t === "N" || mover.t === "C");
+    const prohibited = !pawnNotCrossed
+      && mover.t !== "K"
+      && mover.t !== "P"
+      && mover.t !== target.t
+      && (!rooted || protectedRookException);
+    return [{ target: [tr, tc] as [number, number], targetType: target.t, prohibited }];
+  });
+}
+
+function isPerpetualChase(records: AdjudicationMove[], side: Side): boolean {
+  const responses: AdjudicationMove[] = [];
+  for (let index = 0; index < records.length - 1; index++) {
+    const move = records[index];
+    if (move.mover.side !== side) continue;
+    const response = records[index + 1];
+    const chased = move.chaseCandidates.find(({ target, prohibited }) =>
+      prohibited && target[0] === response.from[0] && target[1] === response.from[1]);
+    if (!chased || chased.targetType !== response.mover.t) return false;
+    responses.push(response);
+  }
+  if (responses.length < 3) return false;
+  return responses.every((response, index) => index === 0
+    || (responses[index - 1].to[0] === response.from[0] && responses[index - 1].to[1] === response.from[1]));
+}
+
+/** 世界象棋规则：长将优先判负；明确长捉判负；其余四次同局面判和。 */
+export function repetitionAdjudication(
+  initialPosition: string,
+  records: AdjudicationMove[],
+): AdjudicationResult | null {
+  if (!records.length) return null;
+  const current = records.at(-1)!.positionKey;
+  const positions = [initialPosition, ...records.map(({ positionKey: key }) => key)];
+  const occurrences = positions.flatMap((key, index) => key === current ? [index] : []);
+  if (occurrences.length < 4) return null;
+
+  const start = occurrences.at(-4)!;
+  const end = occurrences.at(-1)!;
+  const cycle = records.slice(start, end);
+  const redMoves = cycle.filter(({ mover }) => mover.side === "red");
+  const blackMoves = cycle.filter(({ mover }) => mover.side === "black");
+  const redChecks = redMoves.length >= 3 && redMoves.every(({ check }) => check);
+  const blackChecks = blackMoves.length >= 3 && blackMoves.every(({ check }) => check);
+
+  if (redChecks && blackChecks) return { winner: null, message: "双方连续长将，和棋" };
+  if (redChecks) return { winner: "black", message: "红方连续长将未变着，判负" };
+  if (blackChecks) return { winner: "red", message: "黑方连续长将未变着，判负" };
+
+  const redChases = isPerpetualChase(cycle, "red");
+  const blackChases = isPerpetualChase(cycle, "black");
+  if (redChases && blackChases) return { winner: null, message: "双方同类循环长捉，和棋" };
+  if (redChases) return { winner: "black", message: "红方连续长捉未变着，判负" };
+  if (blackChases) return { winner: "red", message: "黑方连续长捉未变着，判负" };
+  return { winner: null, message: "同一局面出现四次，和棋" };
+}
+
+/** 自最后一次吃子起，双方合计100回合；其中最多计入10次将军。 */
+export function naturalMoveAdjudication(records: AdjudicationMove[]): AdjudicationResult | null {
+  const lastCapture = records.findLastIndex(({ captured }) => !!captured);
+  let countedPlies = 0;
+  let countedChecks = 0;
+  for (const record of records.slice(lastCapture + 1)) {
+    if (record.check) {
+      if (countedChecks >= 10) continue;
+      countedChecks++;
+    }
+    countedPlies++;
+  }
+  return countedPlies >= 200 ? { winner: null, message: "双方连续100回合未吃子，和棋" } : null;
 }
 
 // ---------- 简单 AI：贪心 + 一层防守回应 ----------

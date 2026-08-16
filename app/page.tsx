@@ -2,37 +2,37 @@
 
 import {
   aiBestMove,
+  chaseCandidates,
   cloneBoard,
   findKing,
   hasAnyMove,
   inCheck,
   initialBoard,
   legalMoves,
+  naturalMoveAdjudication,
   NAMES,
+  positionKey,
+  repetitionAdjudication,
 } from "@/lib/chess";
-import type { Board, Piece, Side } from "@/lib/chess";
+import type { AdjudicationMove, Board, ChaseCandidate, Piece, Side } from "@/lib/chess";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 
 type Coord = [number, number];
 type GameMode = "ai" | "local";
-type SoundKind = "move" | "capture" | "check" | "win" | "lose";
+type SoundKind = "move" | "capture" | "check" | "win" | "lose" | "draw";
 
-interface MoveRecord {
+interface MoveRecord extends AdjudicationMove {
   before: Board;
   turnBefore: Side;
-  from: Coord;
-  to: Coord;
-  mover: Piece;
-  captured: Piece | null;
   notation: string;
-  check: boolean;
   redTime: number;
   blackTime: number;
+  chaseCandidates: ChaseCandidate[];
 }
 
 interface GameResult {
-  winner: Side;
+  winner: Side | null;
   message: string;
 }
 
@@ -74,7 +74,6 @@ export default function Home() {
   const [selected, setSelected] = useState<Coord | null>(null);
   const [targets, setTargets] = useState<Coord[]>([]);
   const [history, setHistory] = useState<MoveRecord[]>([]);
-  const [lastMove, setLastMove] = useState<{ from: Coord; to: Coord } | null>(null);
   const [flipped, setFlipped] = useState(false);
   const [mode, setMode] = useState<GameMode>("ai");
   const [soundOn, setSoundOn] = useState(true);
@@ -82,9 +81,22 @@ export default function Home() {
   const [result, setResult] = useState<GameResult | null>(null);
   const [resultDismissed, setResultDismissed] = useState(false);
   const [times, setTimes] = useState({ red: 900, black: 900 });
+  const [reviewPly, setReviewPly] = useState<number | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
 
-  const checked = useMemo(() => !result && inCheck(board, turn), [board, result, turn]);
+  const reviewing = reviewPly !== null;
+  const visiblePly = reviewPly ?? history.length;
+  const visibleBoard = useMemo(() => {
+    if (!reviewing || visiblePly === history.length) return board;
+    return cloneBoard(history[visiblePly]?.before ?? history[0]?.before ?? initialBoard());
+  }, [board, history, reviewing, visiblePly]);
+  const visibleTurn = reviewing && visiblePly < history.length
+    ? history[visiblePly].turnBefore
+    : turn;
+  const visibleLastMove = visiblePly > 0
+    ? { from: history[visiblePly - 1].from, to: history[visiblePly - 1].to }
+    : null;
+  const checked = useMemo(() => !!findKing(visibleBoard, visibleTurn) && inCheck(visibleBoard, visibleTurn), [visibleBoard, visibleTurn]);
 
   const playSound = useCallback((kind: SoundKind) => {
     if (!soundOn || typeof window === "undefined") return;
@@ -145,6 +157,8 @@ export default function Home() {
         woodTap(0.12);
         strike(0, 260, 0.13, 0.09);
         strike(0.14, 390, 0.22, 0.12, "sine");
+      } else if (kind === "draw") {
+        [294, 392, 294].forEach((frequency, index) => strike(index * 0.16, frequency, 0.3, 0.075, "sine"));
       } else {
         const notes = kind === "win"
           ? [330, 440, 550, 660]
@@ -165,11 +179,11 @@ export default function Home() {
     setSelected(null);
     setTargets([]);
     setHistory([]);
-    setLastMove(null);
     setResult(null);
     setResultDismissed(false);
     setAiThinking(false);
     setTimes({ red: 900, black: 900 });
+    setReviewPly(null);
   }, [mode]);
 
   const commitMove = useCallback((from: Coord, to: Coord) => {
@@ -190,17 +204,6 @@ export default function Home() {
     const nextTurn: Side = turn === "red" ? "black" : "red";
     const kingAlive = !!findKing(next, nextTurn);
     const gaveCheck = kingAlive && inCheck(next, nextTurn);
-    let gameResult: GameResult | null = null;
-
-    if (!kingAlive) {
-      gameResult = { winner: turn, message: `${turn === "red" ? "红方" : "黑方"}擒将取胜` };
-    } else if (!hasAnyMove(next, nextTurn)) {
-      gameResult = {
-        winner: turn,
-        message: gaveCheck ? "将死，对局结束" : "困毙，对局结束",
-      };
-    }
-
     const record: MoveRecord = {
       before,
       turnBefore: turn,
@@ -210,16 +213,32 @@ export default function Home() {
       captured,
       notation: moveNotation(piece, from, to),
       check: gaveCheck,
+      positionKey: positionKey(next, nextTurn),
+      chaseCandidates: chaseCandidates(next, to, gaveCheck),
       redTime: times.red,
       blackTime: times.black,
     };
+    const nextHistory = [...history, record];
+    let gameResult: GameResult | null = null;
+
+    if (!kingAlive) {
+      gameResult = { winner: turn, message: `${turn === "red" ? "红方" : "黑方"}擒将取胜` };
+    } else if (!hasAnyMove(next, nextTurn)) {
+      gameResult = {
+        winner: turn,
+        message: gaveCheck ? "将死，对局结束" : "困毙，对局结束",
+      };
+    } else {
+      gameResult = repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory)
+        ?? naturalMoveAdjudication(nextHistory);
+    }
 
     setBoard(next);
-    setHistory((current) => [...current, record]);
-    setLastMove({ from, to });
+    setHistory(nextHistory);
     setSelected(null);
     setTargets([]);
     setTurn(nextTurn);
+    setReviewPly(null);
     setResult(gameResult);
     if (gameResult) setResultDismissed(false);
 
@@ -228,10 +247,10 @@ export default function Home() {
       else playSound(captured ? "capture" : "move");
     }
     return true;
-  }, [board, playSound, times.black, times.red, turn]);
+  }, [board, history, playSound, times.black, times.red, turn]);
 
   useEffect(() => {
-    if (result) return;
+    if (result || reviewing) return;
     const timer = window.setInterval(() => {
       setTimes((current) => ({
         ...current,
@@ -239,23 +258,27 @@ export default function Home() {
       }));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [result, turn]);
+  }, [result, reviewing, turn]);
 
   useEffect(() => {
-    if (result || times[turn] > 0) return;
+    if (result || reviewing || times[turn] > 0) return;
     const winner: Side = turn === "red" ? "black" : "red";
     setResult({ winner, message: `${turn === "red" ? "红方" : "黑方"}用时耗尽` });
     setResultDismissed(false);
-  }, [result, times, turn]);
+  }, [result, reviewing, times, turn]);
 
   useEffect(() => {
     if (!result) return;
+    if (!result.winner) {
+      playSound("draw");
+      return;
+    }
     const lostToComputer = mode === "ai" && result.winner === "black";
     playSound(lostToComputer ? "lose" : "win");
   }, [mode, playSound, result]);
 
   useEffect(() => {
-    if (mode !== "ai" || turn !== "black" || result) return;
+    if (mode !== "ai" || turn !== "black" || result || reviewing) return;
     setAiThinking(true);
     const timer = window.setTimeout(() => {
       try {
@@ -269,10 +292,10 @@ export default function Home() {
       }
     }, 520);
     return () => window.clearTimeout(timer);
-  }, [board, commitMove, mode, result, turn]);
+  }, [board, commitMove, mode, result, reviewing, turn]);
 
   const choosePoint = (r: number, c: number) => {
-    if (result || aiThinking || (mode === "ai" && turn === "black")) return;
+    if (result || reviewing || aiThinking || (mode === "ai" && turn === "black")) return;
     const piece = board[r][c];
 
     if (selected && targets.some(([tr, tc]) => tr === r && tc === c)) {
@@ -305,22 +328,28 @@ export default function Home() {
   };
 
   const undo = () => {
-    if (!history.length || aiThinking) return;
+    if (!history.length || aiThinking || reviewing) return;
     const steps = mode === "ai" && turn === "red" && history.length >= 2 ? 2 : 1;
     const restoreIndex = history.length - steps;
     const restore = history[restoreIndex];
     const remaining = history.slice(0, restoreIndex);
-    const previous = remaining.at(-1);
 
     setBoard(cloneBoard(restore.before));
     setTurn(restore.turnBefore);
     setTimes({ red: restore.redTime, black: restore.blackTime });
     setHistory(remaining);
-    setLastMove(previous ? { from: previous.from, to: previous.to } : null);
     setSelected(null);
     setTargets([]);
     setResult(null);
     setResultDismissed(false);
+    setReviewPly(null);
+  };
+
+  const reviewTo = (ply: number) => {
+    setReviewPly(Math.max(0, Math.min(history.length, ply)));
+    setSelected(null);
+    setTargets([]);
+    setResultDismissed(true);
   };
 
   const viewCoordinates = useMemo(() => {
@@ -343,9 +372,11 @@ export default function Home() {
 
   const renderPlayer = (side: Side, top = false) => {
     const isRed = side === "red";
-    const active = turn === side && !result;
+    const active = turn === side && !result && !reviewing;
     const name = isRed ? "长安访客" : mode === "ai" ? "墨隐棋手" : "北境棋手";
-    const note = active
+    const note = reviewing
+      ? `复盘第 ${visiblePly} 手`
+      : active
       ? aiThinking && side === "black" ? "正在推演" : "轮到此方"
       : isRed ? "执红" : mode === "ai" ? "电脑执黑" : "执黑";
     return (
@@ -357,17 +388,24 @@ export default function Home() {
     );
   };
 
-  const statusTitle = result
-    ? `${result.winner === "red" ? "红方" : "黑方"}胜`
+  const statusTitle = reviewing
+    ? visiblePly === 0 ? "复盘 · 开局" : `复盘 · 第 ${visiblePly} 手`
+    : result
+    ? result.winner ? `${result.winner === "red" ? "红方" : "黑方"}胜` : "本局和棋"
     : aiThinking
       ? "墨隐思考中"
       : checked
         ? `${turn === "red" ? "红方" : "黑方"}被将军`
         : `${turn === "red" ? "红方" : "黑方"}行棋`;
-  const statusNote = result?.message
+  const statusNote = reviewing
+    ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
+    : result?.message
     ?? (aiThinking ? "请稍候，对手正在推演棋路" : selected ? `可走 ${targets.length} 处` : "请选择一枚棋子");
   const lostToComputer = mode === "ai" && result?.winner === "black";
-  const outcomeTitle = lostToComputer
+  const isDraw = !!result && !result.winner;
+  const outcomeTitle = isDraw
+    ? "此局言和"
+    : lostToComputer
     ? "此局惜败"
     : mode === "ai"
       ? "你赢了"
@@ -405,16 +443,16 @@ export default function Home() {
                 <span className="palace palace-bottom" />
                 <span className="river"><b>楚 河</b><b>漢 界</b></span>
               </div>
-              <div className="piece-grid" role="grid" aria-label={`${turn === "red" ? "红方" : "黑方"}回合`}>
+              <div className="piece-grid" role="grid" aria-label={reviewing ? `复盘第${visiblePly}手` : `${turn === "red" ? "红方" : "黑方"}回合`}>
                 {viewCoordinates.map(([r, c]) => {
-                  const piece = board[r][c];
+                  const piece = visibleBoard[r][c];
                   const visualRow = flipped ? 9 - r : r;
                   const visualCol = flipped ? 8 - c : c;
-                  const isTarget = targets.some(([tr, tc]) => tr === r && tc === c);
-                  const isSelected = sameCoord(selected, r, c);
-                  const isFrom = sameCoord(lastMove?.from ?? null, r, c);
-                  const isTo = sameCoord(lastMove?.to ?? null, r, c);
-                  const kingChecked = checked && piece?.side === turn && piece.t === "K";
+                  const isTarget = !reviewing && targets.some(([tr, tc]) => tr === r && tc === c);
+                  const isSelected = !reviewing && sameCoord(selected, r, c);
+                  const isFrom = sameCoord(visibleLastMove?.from ?? null, r, c);
+                  const isTo = sameCoord(visibleLastMove?.to ?? null, r, c);
+                  const kingChecked = checked && piece?.side === visibleTurn && piece.t === "K";
                   const classes = [
                     "point",
                     piece ? `piece ${piece.side}` : "",
@@ -471,23 +509,38 @@ export default function Home() {
           </div>
 
           <div className="control-row">
-            <button type="button" onClick={undo} disabled={!history.length || aiThinking} aria-label="悔棋">↶ <span>悔棋</span></button>
+            <button type="button" onClick={undo} disabled={!history.length || aiThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
             <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
             <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>
           </div>
 
           <div className="record-card">
-            <div className="section-heading"><span>着法记录</span><small>{history.length} 手</small></div>
+            <div className="section-heading"><span>着法记录</span><small>{reviewing ? `${visiblePly} / ${history.length} 手` : `${history.length} 手`}</small></div>
             {history.length ? (
-              <div className="record-list" aria-label="本局着法">
-                {movePairs.map((pair, index) => (
-                  <div className="move-pair" key={index}>
-                    <span className="move-number">{index + 1}</span>
-                    <span className="move-cell red-move">{pair.red.notation}{pair.red.check ? " 将" : ""}</span>
-                    <span className="move-cell">{pair.black ? `${pair.black.notation}${pair.black.check ? " 将" : ""}` : "—"}</span>
-                  </div>
-                ))}
-              </div>
+              <>
+                <div className="review-controls" aria-label="棋局复盘控制">
+                  <button type="button" onClick={() => reviewTo(0)} disabled={reviewing && visiblePly === 0} aria-label="回到开局">|‹</button>
+                  <button type="button" onClick={() => reviewTo(visiblePly - 1)} disabled={reviewing && visiblePly === 0} aria-label="上一手">‹</button>
+                  <span>{reviewing ? `第 ${visiblePly} 手` : "当前局面"}</span>
+                  <button type="button" onClick={() => reviewTo(visiblePly + 1)} disabled={!reviewing || visiblePly === history.length} aria-label="下一手">›</button>
+                  <button type="button" onClick={() => setReviewPly(null)} disabled={!reviewing} aria-label="返回当前局面">›|</button>
+                </div>
+                <div className="record-list" aria-label="本局着法">
+                  {movePairs.map((pair, index) => {
+                    const redPly = index * 2 + 1;
+                    const blackPly = index * 2 + 2;
+                    return (
+                      <div className="move-pair" key={index}>
+                        <span className="move-number">{index + 1}</span>
+                        <button className={`move-cell red-move${reviewing && visiblePly === redPly ? " active" : ""}`} type="button" onClick={() => reviewTo(redPly)}>{pair.red.notation}{pair.red.check ? " 将" : ""}</button>
+                        {pair.black
+                          ? <button className={`move-cell${reviewing && visiblePly === blackPly ? " active" : ""}`} type="button" onClick={() => reviewTo(blackPly)}>{pair.black.notation}{pair.black.check ? " 将" : ""}</button>
+                          : <span className="move-cell">—</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
             ) : (
               <div className="empty-record"><span>拾</span><p>棋局尚未开始<br />落下第一子，记录便会出现在这里</p></div>
             )}
@@ -499,24 +552,24 @@ export default function Home() {
               </div>
             ) : null}
           </div>
-          <p className="rule-note">完整象棋规则 · 自动检测将军、将死与困毙</p>
+          <p className="rule-note">竞赛级规则 · 将死、困毙、长将长捉、重复局面与自然限着</p>
         </aside>
       </section>
       <footer>落子无悔，静候知音</footer>
 
       {result && !resultDismissed ? (
-        <div className={`result-overlay ${lostToComputer ? "outcome-lose" : "outcome-win"}`} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
+        <div className={`result-overlay ${isDraw ? "outcome-draw" : lostToComputer ? "outcome-lose" : "outcome-win"}`} role="dialog" aria-modal="true" aria-labelledby="outcome-title">
           <div className="outcome-particles" aria-hidden="true">
             {Array.from({ length: 12 }, (_, index) => <span key={index} />)}
           </div>
           <div className="outcome-card">
-            <div className="outcome-seal" aria-hidden="true"><span>{lostToComputer ? "敗" : "勝"}</span></div>
-            <small>{lostToComputer ? "胜败乃兵家常事" : "妙手定乾坤"}</small>
+            <div className="outcome-seal" aria-hidden="true"><span>{isDraw ? "和" : lostToComputer ? "敗" : "勝"}</span></div>
+            <small>{isDraw ? "纹枰论道 · 握手言和" : lostToComputer ? "胜败乃兵家常事" : "妙手定乾坤"}</small>
             <h2 id="outcome-title">{outcomeTitle}</h2>
             <p>{result.message}</p>
             <div className="outcome-actions">
               <button type="button" onClick={() => startNewGame()} autoFocus>再来一局</button>
-              <button type="button" onClick={() => setResultDismissed(true)}>复盘棋局</button>
+              <button type="button" onClick={() => reviewTo(history.length)}>复盘棋局</button>
             </div>
           </div>
         </div>
