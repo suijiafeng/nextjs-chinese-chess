@@ -254,6 +254,7 @@ export default function Home() {
   const [hint, setHint] = useState<HintMove | null>(null);
   const [result, setResult] = useState<GameResult | null>(null);
   const [engineError, setEngineError] = useState<string | null>(null);
+  const [ruleNotice, setRuleNotice] = useState<string | null>(null);
   const [resultDismissed, setResultDismissed] = useState(false);
   const [times, setTimes] = useState({ red: 900, black: 900 });
   const [reviewPly, setReviewPly] = useState<number | null>(null);
@@ -375,6 +376,7 @@ export default function Home() {
     setHistory([]);
     setResult(null);
     setEngineError(null);
+    setRuleNotice(null);
     setResultDismissed(false);
     setAiThinking(false);
     setHintThinking(false);
@@ -383,7 +385,7 @@ export default function Home() {
     setReviewPly(null);
   }, [mode]);
 
-  const commitMove = useCallback((from: Coord, to: Coord) => {
+  const commitMove = useCallback((from: Coord, to: Coord, actor: "human" | "ai" = "human") => {
     const [fr, fc] = from;
     const [tr, tc] = to;
     const piece = board[fr]?.[fc];
@@ -416,6 +418,18 @@ export default function Home() {
       blackTime: timesRef.current.black,
     };
     const nextHistory = [...history, record];
+    const repetitionResult = repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory);
+    const repeatsCheckTooOften = gaveCheck
+      && repetitionResult?.winner !== null
+      && repetitionResult?.winner !== turn
+      && repetitionResult?.message.includes("不能重复将军超过三次");
+    if (actor === "human" && repeatsCheckTooOften) {
+      setRuleNotice("不能重复将军超过三次，请变换走法");
+      setSelected(null);
+      setTargets([]);
+      setHint(null);
+      return false;
+    }
     let gameResult: GameResult | null = null;
 
     if (!kingAlive) {
@@ -427,10 +441,11 @@ export default function Home() {
       };
     } else {
       gameResult = materialDrawAdjudication(next)
-        ?? repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory)
+        ?? repetitionResult
         ?? naturalMoveAdjudication(nextHistory);
     }
 
+    setRuleNotice(null);
     setBoard(next);
     setHistory(nextHistory);
     setSelected(null);
@@ -447,6 +462,12 @@ export default function Home() {
     }
     return true;
   }, [board, history, playSound, turn]);
+
+  useEffect(() => {
+    if (!ruleNotice) return;
+    const timer = window.setTimeout(() => setRuleNotice(null), 3200);
+    return () => window.clearTimeout(timer);
+  }, [ruleNotice]);
 
   useEffect(() => {
     if (result || engineError || reviewing || hintThinking) return;
@@ -490,7 +511,7 @@ export default function Home() {
           timeMs: aiDifficulty === "master" ? searchBudget : undefined,
         }, searchBudget, () => setGrandmasterReady(true), undefined, controller.signal);
         if (cancelled) return;
-        if (move) commitMove([move[0], move[1]], [move[2], move[3]]);
+        if (move) commitMove([move[0], move[1]], [move[2], move[3]], "ai");
         else setResult({ winner: "red", message: "黑方无子可走，红方取胜" });
       } catch (error) {
         if (cancelled) return;
@@ -552,6 +573,7 @@ export default function Home() {
     setTurn(restore.turnBefore);
     setTimes({ red: restore.redTime, black: restore.blackTime });
     setHistory(remaining);
+    setRuleNotice(null);
     setSelected(null);
     setTargets([]);
     setResult(null);
@@ -563,6 +585,7 @@ export default function Home() {
 
   const reviewTo = (ply: number) => {
     hintRequestRef.current++;
+    setRuleNotice(null);
     setReviewPly(Math.max(0, Math.min(history.length, ply)));
     setSelected(null);
     setTargets([]);
@@ -640,6 +663,8 @@ export default function Home() {
 
   const statusTitle = engineError
     ? "计算暂停"
+    : ruleNotice
+    ? "行棋受限"
     : reviewing
     ? visiblePly === 0 ? "复盘 · 开局" : `复盘 · 第 ${visiblePly} 手`
     : result
@@ -652,7 +677,7 @@ export default function Home() {
         ? `${turn === "red" ? "红方" : "黑方"}被将军`
         : `${turn === "red" ? "红方" : "黑方"}行棋`;
   const statusLoading = !engineError && !reviewing && !result && (aiThinking || hintThinking);
-  const statusNote = engineError ?? (reviewing
+  const statusNote = engineError ?? ruleNotice ?? (reviewing
     ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
     : result?.message
     ?? (aiThinking
@@ -790,7 +815,7 @@ export default function Home() {
             </>
           ) : null}
 
-          <div className={`turn-card${result ? " game-over" : ""}`} role="status" aria-live="polite">
+          <div className={`turn-card${result ? " game-over" : ""}${ruleNotice ? " rule-limited" : ""}`} role="status" aria-live="polite">
             <span className="eyebrow">本局状态</span>
             <div className="turn-title">
               <span className={`mini-piece ${turn === "black" ? "black-mini" : ""}`}>{turn === "red" ? "帥" : "将"}</span>
@@ -846,7 +871,7 @@ export default function Home() {
               </div>
             ) : null}
           </div>
-          <p className="rule-note">竞赛级规则 · 将死、困毙、长将长捉、重复局面与残局和棋</p>
+          <p className="rule-note">本地开局棋谱已启用 · 将死、困毙、长将长捉与重复局面裁定</p>
         </aside>
       </section>
       <footer><span>落子无悔，静候知音</span><b>代码工匠 · 用代码打磨每一步</b></footer>

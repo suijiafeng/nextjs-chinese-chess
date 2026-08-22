@@ -265,9 +265,9 @@ export function repetitionAdjudication(
   const redChecks = redMoves.length >= 3 && redMoves.every(({ check }) => check);
   const blackChecks = blackMoves.length >= 3 && blackMoves.every(({ check }) => check);
 
-  if (redChecks && blackChecks) return { winner: null, message: "双方连续长将，和棋" };
-  if (redChecks) return { winner: "black", message: "红方连续长将未变着，判负" };
-  if (blackChecks) return { winner: "red", message: "黑方连续长将未变着，判负" };
+  if (redChecks && blackChecks) return { winner: null, message: "双方重复将军达到三次，和棋" };
+  if (redChecks) return { winner: "black", message: "红方不能重复将军超过三次，判负" };
+  if (blackChecks) return { winner: "red", message: "黑方不能重复将军超过三次，判负" };
 
   const redChases = isPerpetualChase(cycle, "red");
   const blackChases = isPerpetualChase(cycle, "black");

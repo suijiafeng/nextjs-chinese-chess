@@ -263,6 +263,9 @@ button { color: inherit; }
 .ai-level-note b { margin-right: 6px; color: #4f685b; font-weight: 600; }
 .turn-card { padding: 22px; }
 .turn-card.game-over { border-color: rgba(166,43,37,.25); background: rgba(255, 247, 237, .86); }
+.turn-card.rule-limited { border-color: rgba(166,43,37,.38); background: rgba(255,244,231,.92); }
+.turn-card.rule-limited .turn-title b,
+.turn-card.rule-limited .turn-title small { color: var(--red); }
 .eyebrow, .section-heading small { color: var(--muted); font: 10px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .15em; }
 .turn-title { display: flex; gap: 13px; align-items: center; margin-top: 15px; }
 .mini-piece { width: 42px; height: 42px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--red); border-radius: 50%; color: var(--red); background: #f4dfbc; font-weight: 700; font-size: 22px; }
