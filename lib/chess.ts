@@ -30,6 +30,7 @@ export interface AdjudicationMove {
 export interface AdjudicationResult {
   winner: Side | null;
   message: string;
+  code?: "perpetual-check" | "mutual-perpetual-check" | "perpetual-chase" | "repetition" | "natural-limit" | "material-draw";
 }
 
 export function initialBoard(): Board {
@@ -265,16 +266,16 @@ export function repetitionAdjudication(
   const redChecks = redMoves.length >= 3 && redMoves.every(({ check }) => check);
   const blackChecks = blackMoves.length >= 3 && blackMoves.every(({ check }) => check);
 
-  if (redChecks && blackChecks) return { winner: null, message: "双方重复将军达到三次，和棋" };
-  if (redChecks) return { winner: "black", message: "红方不能重复将军超过三次，判负" };
-  if (blackChecks) return { winner: "red", message: "黑方不能重复将军超过三次，判负" };
+  if (redChecks && blackChecks) return { winner: null, message: "双方重复将军达到三次，和棋", code: "mutual-perpetual-check" };
+  if (redChecks) return { winner: "black", message: "红方不能重复将军超过三次，判负", code: "perpetual-check" };
+  if (blackChecks) return { winner: "red", message: "黑方不能重复将军超过三次，判负", code: "perpetual-check" };
 
   const redChases = isPerpetualChase(cycle, "red");
   const blackChases = isPerpetualChase(cycle, "black");
-  if (redChases && blackChases) return { winner: null, message: "双方同类循环长捉，和棋" };
-  if (redChases) return { winner: "black", message: "红方连续长捉未变着，判负" };
-  if (blackChases) return { winner: "red", message: "黑方连续长捉未变着，判负" };
-  return { winner: null, message: "同一局面出现四次，和棋" };
+  if (redChases && blackChases) return { winner: null, message: "双方同类循环长捉，和棋", code: "perpetual-chase" };
+  if (redChases) return { winner: "black", message: "红方连续长捉未变着，判负", code: "perpetual-chase" };
+  if (blackChases) return { winner: "red", message: "黑方连续长捉未变着，判负", code: "perpetual-chase" };
+  return { winner: null, message: "同一局面出现四次，和棋", code: "repetition" };
 }
 
 /** 自最后一次吃子起，双方合计100回合；其中最多计入10次将军。 */
@@ -289,14 +290,14 @@ export function naturalMoveAdjudication(records: AdjudicationMove[]): Adjudicati
     }
     countedPlies++;
   }
-  return countedPlies >= 200 ? { winner: null, message: "双方连续100回合未吃子，和棋" } : null;
+  return countedPlies >= 200 ? { winner: null, message: "双方连续100回合未吃子，和棋", code: "natural-limit" } : null;
 }
 
 /** 双方均无车、马、炮、兵卒时，防守子力无法进入对方九宫取胜。 */
 export function materialDrawAdjudication(board: Board): AdjudicationResult | null {
   const hasOffensivePiece = board.flat().some((piece) =>
     piece && (piece.t === "R" || piece.t === "N" || piece.t === "C" || piece.t === "P"));
-  return hasOffensivePiece ? null : { winner: null, message: "双方均无进攻子力，和棋" };
+  return hasOffensivePiece ? null : { winner: null, message: "双方均无进攻子力，和棋", code: "material-draw" };
 }
 
 // ---------- AI：迭代加深 + Alpha-Beta + 静态搜索 ----------
@@ -600,13 +601,22 @@ const OPENING_LINES: readonly (readonly string[])[] = [
   ["9674", "0224", "9172", "0726", "6252", "3242", "7776", "2122"],
 ];
 
+function parseMoveId(id: string): [number, number, number, number] | null {
+  if (!/^\d{4}$/.test(id)) return null;
+  const move = [...id].map(Number) as [number, number, number, number];
+  const [fromRow, fromCol, toRow, toCol] = move;
+  return inBoard(fromRow, fromCol) && inBoard(toRow, toCol) ? move : null;
+}
+
 function buildOpeningBook(): Map<string, Map<string, number>> {
   const book = new Map<string, Map<string, number>>();
   for (const line of OPENING_LINES) {
     let board = initialBoard();
     let side: Side = "red";
     for (const id of line) {
-      const [fr, fc, tr, tc] = [...id].map(Number);
+      const move = parseMoveId(id);
+      if (!move) break;
+      const [fr, fc, tr, tc] = move;
       const piece = board[fr]?.[fc];
       if (!piece || piece.side !== side
         || !legalMoves(board, fr, fc).some(([r, c]) => r === tr && c === tc)) break;

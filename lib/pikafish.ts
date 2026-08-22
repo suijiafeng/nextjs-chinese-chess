@@ -29,11 +29,14 @@ let engineWorker: Worker | null = null;
 let engineReady: Promise<void> | null = null;
 let resolveReady: (() => void) | null = null;
 let rejectReady: ((error: Error) => void) | null = null;
+let engineLoadingTimeout: number | null = null;
 let activeSearch: {
   resolve: (move: string | null) => void;
   reject: (error: Error) => void;
   timeout: number;
   onProgress?: (progress: PikafishProgress) => void;
+  signal?: AbortSignal;
+  handleAbort: () => void;
 } | null = null;
 
 function boardToFen(board: Board, side: Side) {
@@ -67,18 +70,29 @@ function parseMove(move: string): EngineMove | null {
   ];
 }
 
+function takeActiveSearch() {
+  const search = activeSearch;
+  if (!search) return null;
+  activeSearch = null;
+  window.clearTimeout(search.timeout);
+  search.signal?.removeEventListener("abort", search.handleAbort);
+  return search;
+}
+
 function disposeEngine(error: Error) {
   engineWorker?.terminate();
   engineWorker = null;
   engineReady = null;
+  if (engineLoadingTimeout !== null) window.clearTimeout(engineLoadingTimeout);
+  engineLoadingTimeout = null;
   rejectReady?.(error);
   rejectReady = null;
   resolveReady = null;
-  if (activeSearch) {
-    window.clearTimeout(activeSearch.timeout);
-    activeSearch.reject(error);
-    activeSearch = null;
-  }
+  takeActiveSearch()?.reject(error);
+}
+
+export function disposePikafish() {
+  disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
 }
 
 function ensureEngine() {
@@ -91,23 +105,23 @@ function ensureEngine() {
 
   try {
     engineWorker = new Worker("/js/worker/pikafish-engine.js");
-    const loadingTimeout = window.setTimeout(() => {
+    engineLoadingTimeout = window.setTimeout(() => {
       disposeEngine(new Error("宗师引擎加载超时"));
     }, 120_000);
 
     engineWorker.onmessage = (event: MessageEvent<EngineMessage>) => {
       const data = event.data;
       if (data.type === "READY") {
-        window.clearTimeout(loadingTimeout);
+        if (engineLoadingTimeout !== null) window.clearTimeout(engineLoadingTimeout);
+        engineLoadingTimeout = null;
         resolveReady?.();
         resolveReady = null;
         rejectReady = null;
         return;
       }
       if (data.type === "BEST_MOVE" && activeSearch) {
-        const search = activeSearch;
-        activeSearch = null;
-        window.clearTimeout(search.timeout);
+        const search = takeActiveSearch();
+        if (!search) return;
         search.resolve(data.move && data.move !== "(none)" ? data.move : null);
         return;
       }
@@ -120,7 +134,6 @@ function ensureEngine() {
       }
     };
     engineWorker.onerror = (event) => {
-      window.clearTimeout(loadingTimeout);
       disposeEngine(new Error(event.message || "宗师引擎启动失败"));
     };
     engineWorker.postMessage({ type: "INIT" });
@@ -137,25 +150,36 @@ export async function pikafishBestMove(
   moveTimeMs: number,
   onReady?: () => void,
   onProgress?: (progress: PikafishProgress) => void,
+  signal?: AbortSignal,
 ): Promise<EngineMove | null> {
-  await ensureEngine();
+  if (signal?.aborted) throw new DOMException("宗师引擎分析已取消", "AbortError");
+  const handleLoadingAbort = () => disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
+  signal?.addEventListener("abort", handleLoadingAbort, { once: true });
+  try {
+    await ensureEngine();
+  } finally {
+    signal?.removeEventListener("abort", handleLoadingAbort);
+  }
   onReady?.();
   if (!engineWorker) throw new Error("宗师引擎尚未就绪");
   if (activeSearch) throw new Error("宗师引擎正在分析另一局面");
 
   const moveText = await new Promise<string | null>((resolve, reject) => {
+    const handleAbort = () => disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
     const timeout = window.setTimeout(() => {
-      engineWorker?.postMessage({ type: "STOP" });
-      if (!activeSearch) return;
-      activeSearch = null;
-      reject(new Error("宗师引擎计算超时"));
+      disposeEngine(new Error("宗师引擎计算超时"));
     }, moveTimeMs + 5000);
-    activeSearch = { resolve, reject, timeout, onProgress };
-    engineWorker!.postMessage({
-      type: "SEARCH",
-      fen: boardToFen(board, side),
-      movetime: moveTimeMs,
-    });
+    activeSearch = { resolve, reject, timeout, onProgress, signal, handleAbort };
+    signal?.addEventListener("abort", handleAbort, { once: true });
+    try {
+      engineWorker!.postMessage({
+        type: "SEARCH",
+        fen: boardToFen(board, side),
+        movetime: moveTimeMs,
+      });
+    } catch (error) {
+      disposeEngine(error instanceof Error ? error : new Error("宗师引擎搜索启动失败"));
+    }
   });
 
   if (!moveText) return null;

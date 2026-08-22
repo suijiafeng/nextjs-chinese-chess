@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  aiBestMove,
   chaseCandidates,
   cloneBoard,
   findKing,
@@ -15,15 +14,21 @@ import {
   positionKey,
   repetitionAdjudication,
 } from "@/lib/chess";
-import type { AdjudicationMove, AiDifficulty, AiOptions, AiSearchProgress, Board, ChaseCandidate, Piece, Side } from "@/lib/chess";
-import { pikafishBestMove } from "@/lib/pikafish";
-import ChessAiWorker from "../workers/chess-ai.worker?worker";
+import type { AdjudicationMove, Board, ChaseCandidate, Piece, Side } from "@/lib/chess";
+import {
+  AI_LEVEL_LABEL,
+  AI_LEVEL_NOTE,
+  aiSearchBudget,
+  analyzeAtLevel,
+  disposeAiClient,
+  isAbortError,
+} from "@/lib/ai-client";
+import type { AiLevel } from "@/lib/ai-client";
+import { ChessBoard } from "@/components/chess-board";
+import type { Coord } from "@/components/chess-board";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { KeyboardEvent } from "react";
 
-type Coord = [number, number];
 type GameMode = "ai" | "local";
-type AiLevel = AiDifficulty | "grandmaster";
 type SoundKind = "move" | "capture" | "check" | "win" | "lose" | "draw";
 
 interface MoveRecord extends AdjudicationMove {
@@ -47,170 +52,6 @@ interface HintMove {
 }
 
 const CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
-const AI_LEVEL_LABEL: Record<AiLevel, string> = { beginner: "入门", standard: "普通", hard: "困难", master: "大师", grandmaster: "宗师" };
-const AI_LEVEL_NOTE: Record<AiLevel, string> = {
-  beginner: "约2层 · 快速思考 · 偶尔选择次优着",
-  standard: "约4层 · 攻守均衡 · 适合日常对弈",
-  hard: "最高约6层 · 深入计算 · 更重视连续战术",
-  master: "最高约8层 · 动态用时 · 强化攻防与残局判断",
-  grandmaster: "Pikafish NNUE · 浏览器多核计算 · 普通玩家极难战胜",
-};
-const AI_SEARCH_MS: Record<Exclude<AiLevel, "master" | "grandmaster">, number> = {
-  beginner: 60,
-  standard: 200,
-  hard: 500,
-};
-
-let workerRequestId = 0;
-
-type AiWorkerMessage = {
-  id: number;
-  move: [number, number, number, number] | null;
-  error?: string;
-  progress?: AiSearchProgress;
-};
-
-type ActiveAnalysis = {
-  id: number;
-  resolve: (move: [number, number, number, number] | null) => void;
-  reject: (error: Error) => void;
-  timeout: number;
-  onProgress?: (progress: AiSearchProgress) => void;
-  signal?: AbortSignal;
-  handleAbort: () => void;
-};
-
-let sharedAiWorker: Worker | null = null;
-let activeAnalysis: ActiveAnalysis | null = null;
-
-function takeActiveAnalysis() {
-  const active = activeAnalysis;
-  if (!active) return null;
-  activeAnalysis = null;
-  window.clearTimeout(active.timeout);
-  active.signal?.removeEventListener("abort", active.handleAbort);
-  return active;
-}
-
-function stopSharedAiWorker(error: Error) {
-  const active = takeActiveAnalysis();
-  sharedAiWorker?.terminate();
-  sharedAiWorker = null;
-  active?.reject(error);
-}
-
-function ensureSharedAiWorker() {
-  if (sharedAiWorker) return sharedAiWorker;
-  const worker = new ChessAiWorker();
-  sharedAiWorker = worker;
-  worker.onmessage = (event: MessageEvent<AiWorkerMessage>) => {
-    const active = activeAnalysis;
-    if (!active || event.data.id !== active.id) return;
-    if (event.data.progress) {
-      active.onProgress?.(event.data.progress);
-      return;
-    }
-    const finished = takeActiveAnalysis();
-    if (!finished) return;
-    if (event.data.error) finished.reject(new Error(event.data.error));
-    else finished.resolve(event.data.move);
-  };
-  worker.onerror = (event) => {
-    if (sharedAiWorker !== worker) return;
-    stopSharedAiWorker(new Error(event.message || "后台棋局分析失败"));
-  };
-  return worker;
-}
-
-function analyzeInWorker(
-  board: Board,
-  options: AiOptions,
-  onProgress?: (progress: AiSearchProgress) => void,
-  signal?: AbortSignal,
-): Promise<[number, number, number, number] | null> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException("棋局分析已取消", "AbortError"));
-      return;
-    }
-    if (activeAnalysis) {
-      reject(new Error("后台棋局分析正在处理另一局面"));
-      return;
-    }
-    const worker = ensureSharedAiWorker();
-    const id = ++workerRequestId;
-    const handleAbort = () => {
-      if (activeAnalysis?.id !== id) return;
-      stopSharedAiWorker(new DOMException("棋局分析已取消", "AbortError"));
-    };
-    const timeout = window.setTimeout(() => {
-      if (activeAnalysis?.id !== id) return;
-      stopSharedAiWorker(new Error("后台棋局分析超时"));
-    }, Math.max(8000, (options.timeMs ?? 0) + 2000));
-    activeAnalysis = { id, resolve, reject, timeout, onProgress, signal, handleAbort };
-    signal?.addEventListener("abort", handleAbort, { once: true });
-    try {
-      worker.postMessage({ id, board, options, reportProgress: !!onProgress });
-    } catch (error) {
-      stopSharedAiWorker(error instanceof Error ? error : new Error("后台棋局分析启动失败"));
-    }
-  });
-}
-
-async function analyzeMove(
-  board: Board,
-  options: AiOptions,
-  onProgress?: (progress: AiSearchProgress) => void,
-  signal?: AbortSignal,
-) {
-  try {
-    return await analyzeInWorker(board, options, onProgress, signal);
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
-    console.warn("AI Worker 不可用，已切换为兼容计算模式。", error);
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
-    if (signal?.aborted) throw new DOMException("棋局分析已取消", "AbortError");
-    return aiBestMove(board, {
-      ...options,
-      timeMs: Math.min(options.timeMs ?? 220, 220),
-      onProgress,
-    });
-  }
-}
-
-async function analyzeAtLevel(
-  board: Board,
-  level: AiLevel,
-  options: Omit<AiOptions, "difficulty">,
-  grandmasterTimeMs: number,
-  onGrandmasterReady?: () => void,
-  onProgress?: (progress: AiSearchProgress) => void,
-  signal?: AbortSignal,
-) {
-  if (level !== "grandmaster") return analyzeMove(board, { ...options, difficulty: level }, onProgress, signal);
-  try {
-    return await pikafishBestMove(
-      board,
-      options.side ?? "black",
-      grandmasterTimeMs,
-      onGrandmasterReady,
-      (progress) => onProgress?.({ depth: progress.depth ?? 0, nodes: progress.nodes ?? 0, elapsedMs: progress.time ?? 0 }),
-    );
-  } catch (error) {
-    console.warn("宗师引擎不可用，已切换为大师兼容模式。", error);
-    return analyzeMove(board, { ...options, difficulty: "master", timeMs: Math.min(options.timeMs ?? 800, 800) }, onProgress, signal);
-  }
-}
-
-function aiSearchBudget(level: AiLevel, blackTime: number) {
-  if (level === "master") return Math.min(1500, Math.max(800, blackTime * 2));
-  if (level === "grandmaster") return Math.min(2200, Math.max(1200, blackTime * 3));
-  return AI_SEARCH_MS[level];
-}
-
-function sameCoord(a: Coord | null, r: number, c: number) {
-  return !!a && a[0] === r && a[1] === c;
-}
 
 function formatTime(total: number) {
   const minutes = Math.floor(total / 60).toString().padStart(2, "0");
@@ -260,6 +101,7 @@ export default function Home() {
   const [reviewPly, setReviewPly] = useState<number | null>(null);
   const audioRef = useRef<AudioContext | null>(null);
   const hintRequestRef = useRef(0);
+  const hintAbortRef = useRef<AbortController | null>(null);
   const timesRef = useRef(times);
 
   useEffect(() => {
@@ -275,21 +117,14 @@ export default function Home() {
   const visibleTurn = reviewing && visiblePly < history.length
     ? history[visiblePly].turnBefore
     : turn;
-  const visibleLastMove = visiblePly > 0
+  const visibleLastMove = useMemo(() => visiblePly > 0
     ? { from: history[visiblePly - 1].from, to: history[visiblePly - 1].to }
-    : null;
+    : null, [history, visiblePly]);
   const checked = useMemo(() => !!findKing(visibleBoard, visibleTurn) && inCheck(visibleBoard, visibleTurn), [visibleBoard, visibleTurn]);
 
-  useEffect(() => {
-    if (window.crossOriginIsolated || !("serviceWorker" in navigator)) return;
-    navigator.serviceWorker.register("/coi-serviceworker.js")
-      .then(async () => {
-        if (!navigator.serviceWorker.controller) {
-          await navigator.serviceWorker.ready;
-          window.location.reload();
-        }
-      })
-      .catch((error) => console.warn("浏览器多核计算环境初始化失败，将使用兼容模式。", error));
+  useEffect(() => () => {
+    hintAbortRef.current?.abort();
+    disposeAiClient();
   }, []);
 
   const playSound = useCallback((kind: SoundKind) => {
@@ -368,6 +203,8 @@ export default function Home() {
 
   const startNewGame = useCallback((nextMode: GameMode = mode) => {
     hintRequestRef.current++;
+    hintAbortRef.current?.abort();
+    hintAbortRef.current = null;
     setMode(nextMode);
     setBoard(initialBoard());
     setTurn("red");
@@ -420,9 +257,9 @@ export default function Home() {
     const nextHistory = [...history, record];
     const repetitionResult = repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory);
     const repeatsCheckTooOften = gaveCheck
-      && repetitionResult?.winner !== null
+      && repetitionResult?.code === "perpetual-check"
       && repetitionResult?.winner !== turn
-      && repetitionResult?.message.includes("不能重复将军超过三次");
+      && repetitionResult.winner !== null;
     if (actor === "human" && repeatsCheckTooOften) {
       setRuleNotice("不能重复将军超过三次，请变换走法");
       setSelected(null);
@@ -472,20 +309,18 @@ export default function Home() {
   useEffect(() => {
     if (result || engineError || reviewing || hintThinking) return;
     const timer = window.setInterval(() => {
-      setTimes((current) => ({
-        ...current,
-        [turn]: Math.max(0, current[turn] - 1),
-      }));
+      const remaining = Math.max(0, timesRef.current[turn] - 1);
+      const nextTimes = { ...timesRef.current, [turn]: remaining };
+      timesRef.current = nextTimes;
+      setTimes(nextTimes);
+      if (remaining === 0) {
+        const winner: Side = turn === "red" ? "black" : "red";
+        setResult({ winner, message: `${turn === "red" ? "红方" : "黑方"}用时耗尽` });
+        setResultDismissed(false);
+      }
     }, 1000);
     return () => window.clearInterval(timer);
   }, [engineError, hintThinking, result, reviewing, turn]);
-
-  useEffect(() => {
-    if (result || engineError || reviewing || times[turn] > 0) return;
-    const winner: Side = turn === "red" ? "black" : "red";
-    setResult({ winner, message: `${turn === "red" ? "红方" : "黑方"}用时耗尽` });
-    setResultDismissed(false);
-  }, [engineError, result, reviewing, times, turn]);
 
   useEffect(() => {
     if (!result) return;
@@ -501,9 +336,10 @@ export default function Home() {
     if (mode !== "ai" || turn !== "black" || result || engineError || reviewing) return;
     const searchBudget = aiSearchBudget(aiDifficulty, timesRef.current.black);
     const controller = new AbortController();
-    setAiThinking(true);
     let cancelled = false;
     const timer = window.setTimeout(async () => {
+      if (cancelled) return;
+      setAiThinking(true);
       try {
         const move = await analyzeAtLevel(board, aiDifficulty, {
           history,
@@ -514,7 +350,7 @@ export default function Home() {
         if (move) commitMove([move[0], move[1]], [move[2], move[3]], "ai");
         else setResult({ winner: "red", message: "黑方无子可走，红方取胜" });
       } catch (error) {
-        if (cancelled) return;
+        if (cancelled || isAbortError(error)) return;
         console.error("棋局计算失败", error);
         setEngineError("棋局计算遇到问题，请重新开局");
       } finally {
@@ -528,7 +364,7 @@ export default function Home() {
     };
   }, [aiDifficulty, board, commitMove, engineError, history, mode, result, reviewing, turn]);
 
-  const choosePoint = (r: number, c: number) => {
+  const choosePoint = useCallback((r: number, c: number) => {
     if (result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === "black")) return;
     const piece = board[r][c];
 
@@ -544,22 +380,7 @@ export default function Home() {
       setSelected(null);
       setTargets([]);
     }
-  };
-
-  const handleBoardKey = (event: KeyboardEvent<HTMLButtonElement>, r: number, c: number) => {
-    const directions: Record<string, Coord> = {
-      ArrowUp: [flipped ? 1 : -1, 0],
-      ArrowDown: [flipped ? -1 : 1, 0],
-      ArrowLeft: [0, flipped ? 1 : -1],
-      ArrowRight: [0, flipped ? -1 : 1],
-    };
-    const direction = directions[event.key];
-    if (!direction) return;
-    event.preventDefault();
-    const nr = Math.max(0, Math.min(9, r + direction[0]));
-    const nc = Math.max(0, Math.min(8, c + direction[1]));
-    document.querySelector<HTMLButtonElement>(`[data-point="${nr}-${nc}"]`)?.focus();
-  };
+  }, [aiThinking, board, commitMove, hintThinking, mode, result, reviewing, selected, targets, turn]);
 
   const undo = () => {
     if (!history.length || aiThinking || hintThinking || reviewing) return;
@@ -568,6 +389,8 @@ export default function Home() {
     const restore = history[restoreIndex];
     const remaining = history.slice(0, restoreIndex);
     hintRequestRef.current++;
+    hintAbortRef.current?.abort();
+    hintAbortRef.current = null;
 
     setBoard(cloneBoard(restore.before));
     setTurn(restore.turnBefore);
@@ -585,6 +408,8 @@ export default function Home() {
 
   const reviewTo = (ply: number) => {
     hintRequestRef.current++;
+    hintAbortRef.current?.abort();
+    hintAbortRef.current = null;
     setRuleNotice(null);
     setReviewPly(Math.max(0, Math.min(history.length, ply)));
     setSelected(null);
@@ -595,6 +420,9 @@ export default function Home() {
 
   const requestHint = () => {
     if (result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === "black")) return;
+    hintAbortRef.current?.abort();
+    const controller = new AbortController();
+    hintAbortRef.current = controller;
     setHintThinking(true);
     const requestId = ++hintRequestRef.current;
     setHint(null);
@@ -606,26 +434,26 @@ export default function Home() {
           history,
           side: turn,
           timeMs: aiDifficulty === "master" ? 900 : undefined,
-        }, 1400, () => setGrandmasterReady(true));
+        }, 1400, () => setGrandmasterReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
         const from: Coord = [move[0], move[1]];
         const to: Coord = [move[2], move[3]];
         const piece = board[from[0]][from[1]];
         if (piece) setHint({ from, to, notation: moveNotation(piece, from, to) });
-      } catch {
-        if (hintRequestRef.current === requestId) setHint(null);
+      } catch (error) {
+        if (hintRequestRef.current !== requestId || isAbortError(error)) return;
+        console.warn("推荐着法分析失败", error);
+        setHint(null);
+        setRuleNotice("提示分析暂时不可用，请稍后再试");
       } finally {
-        if (hintRequestRef.current === requestId) setHintThinking(false);
+        if (hintRequestRef.current === requestId) {
+          hintAbortRef.current = null;
+          setHintThinking(false);
+        }
       }
     }, 30);
   };
-
-  const viewCoordinates = useMemo(() => {
-    const coords: Coord[] = [];
-    for (let r = 0; r < 10; r++) for (let c = 0; c < 9; c++) coords.push([r, c]);
-    return flipped ? coords.reverse() : coords;
-  }, [flipped]);
 
   const movePairs = useMemo(() => {
     return Array.from({ length: Math.ceil(history.length / 2) }, (_, index) => ({
@@ -634,8 +462,10 @@ export default function Home() {
     }));
   }, [history]);
 
-  const capturedByRed = history.filter((item) => item.mover.side === "red" && item.captured);
-  const capturedByBlack = history.filter((item) => item.mover.side === "black" && item.captured);
+  const { capturedByRed, capturedByBlack } = useMemo(() => ({
+    capturedByRed: history.filter((item) => item.mover.side === "red" && item.captured),
+    capturedByBlack: history.filter((item) => item.mover.side === "black" && item.captured),
+  }), [history]);
   const topSide: Side = flipped ? "red" : "black";
   const bottomSide: Side = flipped ? "black" : "red";
 
@@ -724,64 +554,19 @@ export default function Home() {
         <div className="board-column">
           {renderPlayer(topSide, true)}
 
-          <div className="board-frame" aria-label="中国象棋棋盘">
-            <div className="board-surface">
-              <div className="board-lines" aria-hidden="true">
-                <span className="palace palace-top" />
-                <span className="palace palace-bottom" />
-                <span className="river"><b>楚 河</b><b>漢 界</b></span>
-              </div>
-              <div className="piece-grid" role="grid" aria-label={reviewing ? `复盘第${visiblePly}手` : `${turn === "red" ? "红方" : "黑方"}回合`}>
-                {viewCoordinates.map(([r, c]) => {
-                  const piece = visibleBoard[r][c];
-                  const visualRow = flipped ? 9 - r : r;
-                  const visualCol = flipped ? 8 - c : c;
-                  const isTarget = !reviewing && targets.some(([tr, tc]) => tr === r && tc === c);
-                  const isSelected = !reviewing && sameCoord(selected, r, c);
-                  const isFrom = sameCoord(visibleLastMove?.from ?? null, r, c);
-                  const isTo = sameCoord(visibleLastMove?.to ?? null, r, c);
-                  const isHintFrom = !reviewing && sameCoord(hint?.from ?? null, r, c);
-                  const isHintTo = !reviewing && sameCoord(hint?.to ?? null, r, c);
-                  const kingChecked = checked && piece?.side === visibleTurn && piece.t === "K";
-                  const classes = [
-                    "point",
-                    piece ? `piece ${piece.side}` : "",
-                    isTarget ? "target" : "",
-                    isTarget && piece ? "capture-target" : "",
-                    isSelected ? "selected" : "",
-                    isFrom ? "last-from" : "",
-                    isTo ? "last-to" : "",
-                    isHintFrom ? "hint-from" : "",
-                    isHintTo ? "hint-to" : "",
-                    kingChecked ? "king-check" : "",
-                  ].filter(Boolean).join(" ");
-                  const label = piece
-                    ? `${piece.side === "red" ? "红方" : "黑方"}${NAMES[piece.side][piece.t]}，第${r + 1}行第${c + 1}列`
-                    : `第${r + 1}行第${c + 1}列${isTarget ? "，可落子" : ""}`;
-
-                  return (
-                    <button
-                      key={`${r}-${c}`}
-                      className={classes}
-                      type="button"
-                      role="gridcell"
-                      data-point={`${r}-${c}`}
-                      style={{
-                        left: `${visualCol * 12.5}%`,
-                        top: `${visualRow * (100 / 9)}%`,
-                      }}
-                      aria-label={label}
-                      aria-pressed={isSelected}
-                      onClick={() => choosePoint(r, c)}
-                      onKeyDown={(event) => handleBoardKey(event, r, c)}
-                    >
-                      {piece ? <span>{NAMES[piece.side][piece.t]}</span> : null}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
+          <ChessBoard
+            board={visibleBoard}
+            turn={visibleTurn}
+            flipped={flipped}
+            reviewing={reviewing}
+            visiblePly={visiblePly}
+            checked={checked}
+            selected={selected}
+            targets={targets}
+            lastMove={visibleLastMove}
+            hint={hint}
+            onChoose={choosePoint}
+          />
 
           {renderPlayer(bottomSide)}
         </div>
