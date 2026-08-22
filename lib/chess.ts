@@ -592,6 +592,40 @@ function rememberCutoff(context: SearchContext, move: AiMove, ply: number, depth
   context.history.set(id, Math.min(1200, (context.history.get(id) ?? 0) + depth * depth * 8));
 }
 
+/** 精选常见开局谱线：中炮、屏风马、仙人指路与飞相局。 */
+const OPENING_LINES: readonly (readonly string[])[] = [
+  ["7774", "0122", "9776", "0001", "9897", "0726", "6252", "3242"],
+  ["7174", "0726", "9172", "0807", "9091", "0122", "6656", "3646"],
+  ["6252", "3646", "7776", "2122", "9172", "0726", "9674", "0224"],
+  ["9674", "0224", "9172", "0726", "6252", "3242", "7776", "2122"],
+];
+
+function buildOpeningBook(): Map<string, Map<string, number>> {
+  const book = new Map<string, Map<string, number>>();
+  for (const line of OPENING_LINES) {
+    let board = initialBoard();
+    let side: Side = "red";
+    for (const id of line) {
+      const [fr, fc, tr, tc] = [...id].map(Number);
+      const piece = board[fr]?.[fc];
+      if (!piece || piece.side !== side
+        || !legalMoves(board, fr, fc).some(([r, c]) => r === tr && c === tc)) break;
+      const key = positionKey(board, side);
+      const choices = book.get(key) ?? new Map<string, number>();
+      choices.set(id, (choices.get(id) ?? 0) + 1);
+      book.set(key, choices);
+      const next = cloneBoard(board);
+      next[tr][tc] = { ...piece };
+      next[fr][fc] = null;
+      board = next;
+      side = side === "red" ? "black" : "red";
+    }
+  }
+  return book;
+}
+
+const OPENING_BOOK = buildOpeningBook();
+
 function openingBookMove(
   board: Board,
   side: Side,
@@ -599,15 +633,17 @@ function openingBookMove(
   history: AdjudicationMove[],
   difficulty: AiDifficulty,
 ): AiMove | null {
-  const pieceCount = board.flat().filter(Boolean).length;
-  if (pieceCount < 28 || history.length > 5) return null;
-  const redOpenings = ["7174", "9172", "6252"];
-  const blackReplies = ["0122", "0726", "3444", "3242"];
-  const ids = side === "red" && history.length === 0 ? redOpenings : side === "black" ? blackReplies : [];
-  const candidates = ids.flatMap((id) => moves.filter((move) => moveId(move) === id));
+  if (history.length > 16) return null;
+  const choices = OPENING_BOOK.get(positionKey(board, side));
+  if (!choices?.size) return null;
+  const candidates = [...choices]
+    .flatMap(([id, weight]) => moves.filter((move) => moveId(move) === id).map((move) => ({ move, weight })))
+    .sort((a, b) => b.weight - a.weight);
   if (!candidates.length) return null;
-  if (difficulty === "beginner") return candidates[Math.floor(Math.random() * candidates.length)];
-  return candidates[history.length % candidates.length];
+  if (difficulty === "beginner") return candidates[Math.floor(Math.random() * Math.min(3, candidates.length))].move;
+  const bestWeight = candidates[0].weight;
+  const preferred = candidates.filter(({ weight }) => weight >= bestWeight * 0.72);
+  return preferred[history.length % preferred.length].move;
 }
 
 function quiescence(
