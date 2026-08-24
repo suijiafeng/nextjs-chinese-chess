@@ -2,5 +2,6 @@
 /.next
 /dist
 /.wrangler
+next-env.d.ts
 .DS_Store
 *.log
