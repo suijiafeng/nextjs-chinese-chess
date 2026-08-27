@@ -1,5 +1,5 @@
 import { legalMoves } from "./chess";
-import type { Board, PieceType, Side } from "./chess";
+import type { AdjudicationMove, Board, PieceType, Side } from "./chess";
 
 type EngineMove = [number, number, number, number];
 
@@ -58,6 +58,18 @@ function boardToFen(board: Board, side: Side) {
     return text + (empty || "");
   });
   return `${rows.join("/")} ${side === "red" ? "w" : "b"} - - 0 1`;
+}
+
+function moveToUci(move: AdjudicationMove): string {
+  const [fr, fc] = move.from;
+  const [tr, tc] = move.to;
+  const fromFile = String.fromCharCode(97 + fc);
+  const toFile = String.fromCharCode(97 + tc);
+  return `${fromFile}${9 - fr}${toFile}${9 - tr}`;
+}
+
+function historyToUci(history: AdjudicationMove[]): string[] {
+  return history.map(moveToUci);
 }
 
 function parseMove(move: string): EngineMove | null {
@@ -151,6 +163,7 @@ export async function pikafishBestMove(
   onReady?: () => void,
   onProgress?: (progress: PikafishProgress) => void,
   signal?: AbortSignal,
+  history?: AdjudicationMove[],
 ): Promise<EngineMove | null> {
   if (signal?.aborted) throw new DOMException("宗师引擎分析已取消", "AbortError");
   const handleLoadingAbort = () => disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
@@ -176,6 +189,7 @@ export async function pikafishBestMove(
         type: "SEARCH",
         fen: boardToFen(board, side),
         movetime: moveTimeMs,
+        moves: history ? historyToUci(history) : [],
       });
     } catch (error) {
       disposeEngine(error instanceof Error ? error : new Error("宗师引擎搜索启动失败"));

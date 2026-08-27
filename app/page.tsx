@@ -7,6 +7,8 @@ import {
   hasAnyMove,
   inCheck,
   initialBoard,
+  isPerpetualChaseMove,
+  isPerpetualCheckMove,
   legalMoves,
   materialDrawAdjudication,
   naturalMoveAdjudication,
@@ -255,18 +257,25 @@ export default function Home() {
       blackTime: timesRef.current.black,
     };
     const nextHistory = [...history, record];
-    const repetitionResult = repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory);
-    const repeatsCheckTooOften = gaveCheck
-      && repetitionResult?.code === "perpetual-check"
-      && repetitionResult?.winner !== turn
-      && repetitionResult.winner !== null;
-    if (actor === "human" && repeatsCheckTooOften) {
-      setRuleNotice("不能重复将军超过三次，请变换走法");
+    const isPerpetualCheck = gaveCheck
+      && isPerpetualCheckMove(positionKey(initialBoard(), "red"), history, record);
+    const isPerpetualChase = !gaveCheck
+      && isPerpetualChaseMove(positionKey(initialBoard(), "red"), history, record);
+    if (isPerpetualCheck) {
+      setRuleNotice("禁止长将：不能连续将军超过三次");
       setSelected(null);
       setTargets([]);
       setHint(null);
       return false;
     }
+    if (isPerpetualChase) {
+      setRuleNotice("禁止长捉：不能连续捉同一子超过三次");
+      setSelected(null);
+      setTargets([]);
+      setHint(null);
+      return false;
+    }
+    const repetitionResult = repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory);
     let gameResult: GameResult | null = null;
 
     if (!kingAlive) {

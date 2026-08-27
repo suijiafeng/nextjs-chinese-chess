@@ -30,7 +30,7 @@ export interface AdjudicationMove {
 export interface AdjudicationResult {
   winner: Side | null;
   message: string;
-  code?: "perpetual-check" | "mutual-perpetual-check" | "perpetual-chase" | "repetition" | "natural-limit" | "material-draw";
+  code?: "mutual-perpetual-check" | "perpetual-chase" | "repetition" | "natural-limit" | "material-draw";
 }
 
 export function initialBoard(): Board {
@@ -149,8 +149,7 @@ function isAttacked(board: Board, r: number, c: number, bySide: Side): boolean {
   for (let rr = 0; rr < ROWS; rr++)
     for (let cc = 0; cc < COLS; cc++) {
       const p = board[rr][cc];
-      if (p && p.side === bySide && pseudoMoves(board, rr, cc).some(([mr, mc]) => mr === r && mc === c))
-        return true;
+      if (p && p.side === bySide && pieceControls(board, rr, cc, r, c)) return true;
     }
   return false;
 }
@@ -169,14 +168,21 @@ export function inCheck(board: Board, side: Side): boolean {
   return isAttacked(board, k[0], k[1], side === 'red' ? 'black' : 'red') || generalsFacing(board);
 }
 
+/** 不复制棋盘，直接在原盘上试走并还原，用于过滤送将。 */
+function leavesKingInCheck(board: Board, r: number, c: number, tr: number, tc: number): boolean {
+  const piece = board[r][c];
+  const captured = board[tr][tc];
+  board[tr][tc] = piece;
+  board[r][c] = null;
+  const result = inCheck(board, piece!.side);
+  board[r][c] = piece;
+  board[tr][tc] = captured;
+  return result;
+}
+
 export function legalMoves(board: Board, r: number, c: number): [number, number][] {
   const p = board[r][c]!;
-  return pseudoMoves(board, r, c).filter(([tr, tc]) => {
-    const nb = cloneBoard(board);
-    nb[tr][tc] = nb[r][c];
-    nb[r][c] = null;
-    return !inCheck(nb, p.side);
-  });
+  return pseudoMoves(board, r, c).filter(([tr, tc]) => !leavesKingInCheck(board, r, c, tr, tc));
 }
 
 export function hasAnyMove(board: Board, side: Side): boolean {
@@ -247,7 +253,7 @@ function isPerpetualChase(records: AdjudicationMove[], side: Side): boolean {
     || (responses[index - 1].to[0] === response.from[0] && responses[index - 1].to[1] === response.from[1]));
 }
 
-/** 世界象棋规则：长将优先判负；明确长捉判负；其余四次同局面判和。 */
+/** 世界象棋规则：单方连续将军或长捉三次即构成禁着；其余四次同局面判和。 */
 export function repetitionAdjudication(
   initialPosition: string,
   records: AdjudicationMove[],
@@ -267,15 +273,59 @@ export function repetitionAdjudication(
   const blackChecks = blackMoves.length >= 3 && blackMoves.every(({ check }) => check);
 
   if (redChecks && blackChecks) return { winner: null, message: "双方重复将军达到三次，和棋", code: "mutual-perpetual-check" };
-  if (redChecks) return { winner: "black", message: "红方不能重复将军超过三次，判负", code: "perpetual-check" };
-  if (blackChecks) return { winner: "red", message: "黑方不能重复将军超过三次，判负", code: "perpetual-check" };
 
   const redChases = isPerpetualChase(cycle, "red");
   const blackChases = isPerpetualChase(cycle, "black");
   if (redChases && blackChases) return { winner: null, message: "双方同类循环长捉，和棋", code: "perpetual-chase" };
-  if (redChases) return { winner: "black", message: "红方连续长捉未变着，判负", code: "perpetual-chase" };
-  if (blackChases) return { winner: "red", message: "黑方连续长捉未变着，判负", code: "perpetual-chase" };
   return { winner: null, message: "同一局面出现四次，和棋", code: "repetition" };
+}
+
+/**
+ * 判断这手棋是否构成长将（单方连续第三次将军且局面重复）。
+ * 供 UI 拒绝该着、AI 直接排除，不再走判负流程。
+ */
+export function isPerpetualCheckMove(
+  initialPosition: string,
+  history: AdjudicationMove[],
+  candidate: AdjudicationMove,
+): boolean {
+  const records = [...history, candidate];
+  const current = candidate.positionKey;
+  const positions = [initialPosition, ...records.map(({ positionKey: key }) => key)];
+  const occurrences = positions.flatMap((key, index) => key === current ? [index] : []);
+  if (occurrences.length < 4) return false;
+
+  const start = occurrences.at(-4)!;
+  const end = occurrences.at(-1)!;
+  const cycle = records.slice(start, end);
+  const ownMoves = cycle.filter(({ mover }) => mover.side === candidate.mover.side);
+  const opponentMoves = cycle.filter(({ mover }) => mover.side !== candidate.mover.side);
+  const ownPerpetual = ownMoves.length >= 3 && ownMoves.every(({ check }) => check);
+  const opponentPerpetual = opponentMoves.length >= 3 && opponentMoves.every(({ check }) => check);
+  return ownPerpetual && !opponentPerpetual;
+}
+
+/**
+ * 判断这手棋是否构成长捉（单方连续第三次捉子且局面重复）。
+ * 供 UI 拒绝该着、AI 直接排除。
+ */
+export function isPerpetualChaseMove(
+  initialPosition: string,
+  history: AdjudicationMove[],
+  candidate: AdjudicationMove,
+): boolean {
+  const records = [...history, candidate];
+  const current = candidate.positionKey;
+  const positions = [initialPosition, ...records.map(({ positionKey: key }) => key)];
+  const occurrences = positions.flatMap((key, index) => key === current ? [index] : []);
+  if (occurrences.length < 4) return false;
+
+  const start = occurrences.at(-4)!;
+  const end = occurrences.at(-1)!;
+  const cycle = records.slice(start, end);
+  const ownSide = candidate.mover.side;
+  const otherSide: Side = ownSide === "red" ? "black" : "red";
+  return isPerpetualChase(cycle, ownSide) && !isPerpetualChase(cycle, otherSide);
 }
 
 /** 自最后一次吃子起，双方合计100回合；其中最多计入10次将军。 */
@@ -322,7 +372,6 @@ type AiMove = {
   to: [number, number];
   mover: Piece;
   captured: Piece | null;
-  next: Board;
   check: boolean;
   order: number;
 };
@@ -547,12 +596,105 @@ function cachedEvaluation(board: Board, context: SearchContext): number {
   return value;
 }
 
+function lastOwnRecord(history: AdjudicationMove[], side: Side): AdjudicationMove | undefined {
+  for (let index = history.length - 1; index >= 0; index--) {
+    if (history[index].mover.side === side) return history[index];
+  }
+}
+
+/** 沿该棋子来路回溯，统计本方已连续走动它的次数。 */
+function samePieceStreak(history: AdjudicationMove[], move: AiMove, side: Side): number {
+  let streak = 0;
+  let square = move.from;
+  for (let index = history.length - 1; index >= 0; index--) {
+    const record = history[index];
+    if (record.mover.side !== side) continue;
+    if (record.to[0] !== square[0] || record.to[1] !== square[1]) break;
+    streak++;
+    square = record.from;
+  }
+  return streak;
+}
+
+function isReverseOfLastOwn(history: AdjudicationMove[], move: AiMove, side: Side): boolean {
+  const lastOwn = lastOwnRecord(history, side);
+  if (!lastOwn) return false;
+  return lastOwn.to[0] === move.from[0] && lastOwn.to[1] === move.from[1]
+    && lastOwn.from[0] === move.to[0] && lastOwn.from[1] === move.to[1];
+}
+
+/** 统计最近几步里，本方的将军是否都来自同一只棋。 */
+function recentCheckStreak(history: AdjudicationMove[], move: AiMove, side: Side): number {
+  let streak = 0;
+  for (let index = history.length - 1; index >= 0 && streak < 4; index--) {
+    const record = history[index];
+    if (record.mover.side !== side) continue;
+    if (!record.check) break;
+    if (record.from[0] === move.from[0] && record.from[1] === move.from[1]) {
+      streak++;
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
+
+/**
+ * 安静局面里连续走同一只棋、或原路退回时扣分。
+ * 吃子、将军或己方已被将时不扣，避免耽误应手。
+ */
+function idlePiecePenalty(
+  history: AdjudicationMove[],
+  move: AiMove,
+  side: Side,
+  inCheckNow: boolean,
+): number {
+  if (inCheckNow || move.captured || move.check) return 0;
+  const streak = samePieceStreak(history, move, side);
+  if (streak <= 0) return 0;
+  let penalty = 55 * streak;
+  if (isReverseOfLastOwn(history, move, side)) penalty += 85;
+  return Math.min(180, penalty);
+}
+
+/**
+ * 反复用同一只棋将军时扣分。
+ * 吃子将军、将位已被挪动或刚被应将时不扣，避免误伤真正的杀着。
+ */
+function perpetualCheckPenalty(
+  history: AdjudicationMove[],
+  move: AiMove,
+  side: Side,
+  inCheckNow: boolean,
+): number {
+  if (!move.check || inCheckNow) return 0;
+  const streak = recentCheckStreak(history, move, side);
+  if (streak <= 0) return 0;
+  const penalty = 160 * streak + (move.captured ? -60 : 0);
+  return Math.min(600, Math.max(0, penalty));
+}
+
+function rootMovePenalty(
+  history: AdjudicationMove[],
+  move: AiMove,
+  side: Side,
+  inCheckNow: boolean,
+): number {
+  return idlePiecePenalty(history, move, side, inCheckNow)
+    + perpetualCheckPenalty(history, move, side, inCheckNow);
+}
+
+function preferScore(side: Side, score: number) {
+  return side === "black" ? score : -score;
+}
+
 function generateAiMoves(
   board: Board,
   side: Side,
   preferred?: string,
   context?: SearchContext,
   ply = 0,
+  repeatSquare?: [number, number],
 ): AiMove[] {
   const moves: AiMove[] = [];
   for (let r = 0; r < ROWS; r++)
@@ -561,24 +703,26 @@ function generateAiMoves(
       if (!mover || mover.side !== side) continue;
       for (const [tr, tc] of legalMoves(board, r, c)) {
         const captured = board[tr][tc] ? { ...board[tr][tc]! } : null;
-        const next = cloneBoard(board);
-        next[tr][tc] = { ...mover };
-        next[r][c] = null;
+        board[tr][tc] = mover;
+        board[r][c] = null;
         const enemy: Side = side === "red" ? "black" : "red";
-        const check = captured?.t === "K" || (!!findKing(next, enemy) && inCheck(next, enemy));
+        const check = captured?.t === "K" || (!!findKing(board, enemy) && inCheck(board, enemy));
+        board[r][c] = mover;
+        board[tr][tc] = captured;
         const candidate: AiMove = {
           from: [r, c],
           to: [tr, tc],
           mover: { ...mover },
           captured,
-          next,
           check,
           order: (captured ? PIECE_VALUE[captured.t] * 12 - PIECE_VALUE[mover.t] : 0) + (check ? 3000 : 0),
         };
         const id = moveId(candidate);
-        if (preferred && id === preferred) candidate.order += 100000;
+        const idleRepeat = !!repeatSquare && r === repeatSquare[0] && c === repeatSquare[1] && !captured && !check;
+        if (preferred && id === preferred && !idleRepeat) candidate.order += 100000;
         if (context?.killers.get(ply)?.includes(id)) candidate.order += 1800;
         candidate.order += context?.history.get(id) ?? 0;
+        if (idleRepeat) candidate.order -= 420;
         moves.push(candidate);
       }
     }
@@ -656,6 +800,16 @@ function openingBookMove(
   return preferred[history.length % preferred.length].move;
 }
 
+function makeMove(board: Board, move: AiMove) {
+  board[move.to[0]][move.to[1]] = move.mover;
+  board[move.from[0]][move.from[1]] = null;
+}
+
+function unmakeMove(board: Board, move: AiMove) {
+  board[move.from[0]][move.from[1]] = move.mover;
+  board[move.to[0]][move.to[1]] = move.captured;
+}
+
 function quiescence(
   board: Board,
   side: Side,
@@ -679,7 +833,10 @@ function quiescence(
     if (!checked && best >= beta) return best;
     alpha = Math.max(alpha, best);
     for (const move of tacticalMoves) {
-      best = Math.max(best, quiescence(move.next, "red", alpha, beta, context, depth - 1));
+      makeMove(board, move);
+      const score = quiescence(board, "red", alpha, beta, context, depth - 1);
+      unmakeMove(board, move);
+      best = Math.max(best, score);
       alpha = Math.max(alpha, best);
       if (alpha >= beta) break;
     }
@@ -690,7 +847,10 @@ function quiescence(
   if (!checked && best <= alpha) return best;
   beta = Math.min(beta, best);
   for (const move of tacticalMoves) {
-    best = Math.min(best, quiescence(move.next, "black", alpha, beta, context, depth - 1));
+    makeMove(board, move);
+    const score = quiescence(board, "black", alpha, beta, context, depth - 1);
+    unmakeMove(board, move);
+    best = Math.min(best, score);
     beta = Math.min(beta, best);
     if (alpha >= beta) break;
   }
@@ -736,7 +896,9 @@ function alphaBeta(
   try {
     for (const move of moves) {
       const nextSide: Side = side === "black" ? "red" : "black";
-      const result = alphaBeta(move.next, nextSide, depth - 1, alpha, beta, ply + 1, context, path);
+      makeMove(board, move);
+      const result = alphaBeta(board, nextSide, depth - 1, alpha, beta, ply + 1, context, path);
+      unmakeMove(board, move);
       if ((side === "black" && result > value) || (side === "red" && result < value)) {
         value = result;
         bestMove = move;
@@ -773,12 +935,20 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
     killers: new Map(),
     history: new Map(PERSISTENT_HISTORY),
   };
+  const history = options.history ?? [];
+  const lastOwn = lastOwnRecord(history, side);
   const rootKey = zobristKey(board, side);
-  const rootMoves = generateAiMoves(board, side, ROOT_MOVE_HINTS.get(rootKey), context);
+  const rootMoves = generateAiMoves(
+    board,
+    side,
+    ROOT_MOVE_HINTS.get(rootKey),
+    context,
+    0,
+    lastOwn?.to,
+  );
   if (!rootMoves.length) return null;
   const kingCapture = rootMoves.find(({ captured }) => captured?.t === "K");
   if (kingCapture) return [kingCapture.from[0], kingCapture.from[1], kingCapture.to[0], kingCapture.to[1]];
-  const history = options.history ?? [];
   const bookMove = openingBookMove(board, side, rootMoves, history, difficulty);
   if (bookMove) return [bookMove.from[0], bookMove.from[1], bookMove.to[0], bookMove.to[1]];
   let completed: { move: AiMove; score: number }[] = [{
@@ -796,21 +966,26 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
       let rootAlpha = -Infinity;
       let rootBeta = Infinity;
       for (const move of rootMoves) {
+        makeMove(board, move);
         const synthetic: AdjudicationMove = {
           mover: move.mover,
           from: move.from,
           to: move.to,
           captured: move.captured,
           check: move.check,
-          positionKey: positionKey(move.next, side === "black" ? "red" : "black"),
-          chaseCandidates: chaseCandidates(move.next, move.to, move.check),
+          positionKey: positionKey(board, side === "black" ? "red" : "black"),
+          chaseCandidates: chaseCandidates(board, move.to, move.check),
         };
-        const adjudication = repetitionAdjudication(positionKey(initialBoard(), "red"), [...history, synthetic])
-          ?? naturalMoveAdjudication([...history, synthetic]);
+        const banned = isPerpetualCheckMove(positionKey(initialBoard(), "red"), history, synthetic)
+          || isPerpetualChaseMove(positionKey(initialBoard(), "red"), history, synthetic);
+        const adjudication = banned
+          ? { winner: side === "black" ? "red" as Side : "black" as Side, message: "" }
+          : repetitionAdjudication(positionKey(initialBoard(), "red"), [...history, synthetic])
+            ?? naturalMoveAdjudication([...history, synthetic]);
         const score = adjudication
           ? adjudication.winner === "black" ? MATE_SCORE : adjudication.winner === "red" ? -MATE_SCORE : 0
           : alphaBeta(
-            move.next,
+            board,
             side === "black" ? "red" : "black",
             depth - 1,
             rootAlpha,
@@ -819,6 +994,7 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
             context,
             historyPath,
           );
+        unmakeMove(board, move);
         iteration.push({ move, score });
         if (side === "black") rootAlpha = Math.max(rootAlpha, score);
         else rootBeta = Math.min(rootBeta, score);
@@ -838,13 +1014,19 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
     }
   }
 
-  const bestScore = completed[0].score;
+  const rootInCheck = inCheck(board, side);
+  const sign = side === "black" ? 1 : -1;
+  const ranked = completed.map(({ move, score }) => ({
+    move,
+    adjusted: score - sign * rootMovePenalty(history, move, side, rootInCheck),
+  }));
+  ranked.sort((left, right) => preferScore(side, right.adjusted) - preferScore(side, left.adjusted));
+  const bestAdjusted = ranked[0].adjusted;
   const candidates = difficulty === "beginner"
-    ? completed.filter(({ score }) => side === "black"
-      ? score >= bestScore - limits.randomWindow
-      : score <= bestScore + limits.randomWindow).slice(0, 3)
-    : completed.slice(0, 1);
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)]?.move ?? completed[0].move;
+    ? ranked.filter(({ adjusted }) =>
+      preferScore(side, adjusted) >= preferScore(side, bestAdjusted) - limits.randomWindow).slice(0, 3)
+    : ranked.slice(0, 1);
+  const chosen = candidates[Math.floor(Math.random() * candidates.length)]?.move ?? ranked[0].move;
   ROOT_MOVE_HINTS.set(rootKey, moveId(chosen));
   if (ROOT_MOVE_HINTS.size > 512) ROOT_MOVE_HINTS.delete(ROOT_MOVE_HINTS.keys().next().value!);
   for (const [id, value] of context.history) {

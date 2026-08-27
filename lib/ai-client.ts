@@ -198,6 +198,7 @@ export async function analyzeAtLevel(
         elapsedMs: progress.time ?? 0,
       }),
       signal,
+      options.history,
     );
   } catch (error) {
     if (isAbortError(error)) throw error;
