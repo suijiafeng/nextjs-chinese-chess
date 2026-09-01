@@ -174,6 +174,8 @@ button { color: inherit; }
   font-size: clamp(23px, 3vw, 39px); font-weight: 700; line-height: 1;
   transition: transform .16s ease, box-shadow .16s ease;
 }
+.piece-glyph { display: block; line-height: 1; }
+.piece-facing-top .piece-glyph { transform: rotate(180deg); }
 .piece:hover > span { transform: translate(-50%, -54%); box-shadow: 0 6px 9px rgba(78,49,24,.32), inset 0 0 0 3px rgba(255,240,203,.5); }
 .piece.red { color: var(--red); }
 .piece.black { color: #302e29; }
