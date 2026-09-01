@@ -27,7 +27,8 @@ import {
 } from "@/lib/ai-client";
 import type { AiLevel } from "@/lib/ai-client";
 import { ChessBoard } from "@/components/chess-board";
-import type { Coord } from "@/components/chess-board";
+import type { Coord, MovingPiece } from "@/components/chess-board";
+import { disposeGameSounds, playGameSound } from "@/lib/game-sounds";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type GameMode = "ai" | "local";
@@ -54,6 +55,21 @@ interface HintMove {
 }
 
 const CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
+const SAVE_KEY = "changan-xiangqi-save-v1";
+
+interface SaveData {
+  version: 1;
+  board: Board;
+  turn: Side;
+  history: MoveRecord[];
+  times: { red: number; black: number };
+  mode: GameMode;
+  aiDifficulty: AiLevel;
+  flipped: boolean;
+  soundOn: boolean;
+  result: GameResult | null;
+}
 
 function formatTime(total: number) {
   const minutes = Math.floor(total / 60).toString().padStart(2, "0");
@@ -101,7 +117,9 @@ export default function Home() {
   const [resultDismissed, setResultDismissed] = useState(false);
   const [times, setTimes] = useState({ red: 900, black: 900 });
   const [reviewPly, setReviewPly] = useState<number | null>(null);
-  const audioRef = useRef<AudioContext | null>(null);
+  const [moving, setMoving] = useState<MovingPiece | null>(null);
+  const [resignConfirm, setResignConfirm] = useState(false);
+  const [restored, setRestored] = useState(false);
   const hintRequestRef = useRef(0);
   const hintAbortRef = useRef<AbortController | null>(null);
   const timesRef = useRef(times);
@@ -109,6 +127,58 @@ export default function Home() {
   useEffect(() => {
     timesRef.current = times;
   }, [times]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const raw = window.localStorage.getItem(SAVE_KEY);
+        if (raw) {
+          const data = JSON.parse(raw) as SaveData;
+          if (data?.version === 1 && Array.isArray(data.board) && data.board.length === 10) {
+            setBoard(data.board);
+            setTurn(data.turn === "black" ? "black" : "red");
+            setHistory(Array.isArray(data.history) ? data.history : []);
+            const savedTimes = data.times ?? { red: 900, black: 900 };
+            setTimes(savedTimes);
+            timesRef.current = savedTimes;
+            setMode(data.mode === "local" ? "local" : "ai");
+            setAiDifficulty(data.aiDifficulty ?? "standard");
+            setFlipped(!!data.flipped);
+            setSoundOn(data.soundOn !== false);
+            if (data.result) {
+              setResult(data.result);
+              setResultDismissed(true);
+            }
+          }
+        }
+      } catch {
+        // 存档损坏时直接以新局开始。
+      }
+      setRestored(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!restored) return;
+    const data: SaveData = {
+      version: 1,
+      board,
+      turn,
+      history,
+      times,
+      mode,
+      aiDifficulty,
+      flipped,
+      soundOn,
+      result,
+    };
+    try {
+      window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    } catch {
+      // 存储不可用时忽略。
+    }
+  }, [aiDifficulty, board, flipped, history, mode, restored, result, soundOn, times, turn]);
 
   const reviewing = reviewPly !== null;
   const visiblePly = reviewPly ?? history.length;
@@ -127,77 +197,13 @@ export default function Home() {
   useEffect(() => () => {
     hintAbortRef.current?.abort();
     disposeAiClient();
+    disposeGameSounds();
   }, []);
 
   const playSound = useCallback((kind: SoundKind) => {
-    if (!soundOn || typeof window === "undefined") return;
+    if (!soundOn) return;
     try {
-      const context = audioRef.current ?? new AudioContext();
-      audioRef.current = context;
-      if (context.state === "suspended") void context.resume();
-
-      const strike = (
-        offset: number,
-        frequency: number,
-        duration: number,
-        volume: number,
-        type: OscillatorType = "triangle",
-      ) => {
-        const start = context.currentTime + offset;
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        oscillator.type = type;
-        oscillator.frequency.setValueAtTime(frequency, start);
-        oscillator.frequency.exponentialRampToValueAtTime(Math.max(55, frequency * 0.72), start + duration);
-        gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.exponentialRampToValueAtTime(volume, start + 0.008);
-        gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
-        oscillator.connect(gain).connect(context.destination);
-        oscillator.start(start);
-        oscillator.stop(start + duration + 0.02);
-      };
-
-      const woodTap = (volume = 0.13) => {
-        const length = Math.floor(context.sampleRate * 0.055);
-        const buffer = context.createBuffer(1, length, context.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let index = 0; index < length; index++) {
-          const decay = Math.pow(1 - index / length, 4);
-          data[index] = (Math.random() * 2 - 1) * decay;
-        }
-        const source = context.createBufferSource();
-        const filter = context.createBiquadFilter();
-        const gain = context.createGain();
-        filter.type = "bandpass";
-        filter.frequency.value = 520;
-        filter.Q.value = 0.8;
-        gain.gain.value = volume;
-        source.buffer = buffer;
-        source.connect(filter).connect(gain).connect(context.destination);
-        source.start();
-      };
-
-      if (kind === "move") {
-        woodTap();
-        strike(0, 155, 0.09, 0.08);
-      } else if (kind === "capture") {
-        woodTap(0.17);
-        strike(0, 135, 0.12, 0.12, "square");
-        strike(0.075, 92, 0.16, 0.08);
-      } else if (kind === "check") {
-        woodTap(0.12);
-        strike(0, 260, 0.13, 0.09);
-        strike(0.14, 390, 0.22, 0.12, "sine");
-      } else if (kind === "draw") {
-        [294, 392, 294].forEach((frequency, index) => strike(index * 0.16, frequency, 0.3, 0.075, "sine"));
-      } else {
-        const notes = kind === "win"
-          ? [330, 440, 550, 660]
-          : [330, 247, 185, 123];
-        notes.forEach((frequency, index) => {
-          strike(index * 0.15, frequency, index === notes.length - 1 ? 0.48 : 0.24, 0.09, "sine");
-        });
-      }
+      playGameSound(kind);
     } catch {
       // 声音不可用不影响对局本身。
     }
@@ -222,7 +228,10 @@ export default function Home() {
     setHint(null);
     setTimes({ red: 900, black: 900 });
     setReviewPly(null);
+    setMoving(null);
   }, [mode]);
+
+  const handleMoveDone = useCallback(() => setMoving(null), []);
 
   const commitMove = useCallback((from: Coord, to: Coord, actor: "human" | "ai" = "human") => {
     const [fr, fc] = from;
@@ -300,6 +309,7 @@ export default function Home() {
     setTurn(nextTurn);
     setReviewPly(null);
     setResult(gameResult);
+    setMoving({ piece: { ...piece }, from, to, captured });
     if (gameResult) setResultDismissed(false);
 
     if (!gameResult) {
@@ -413,10 +423,32 @@ export default function Home() {
     setResultDismissed(false);
     setReviewPly(null);
     setHint(null);
+    setMoving(null);
   };
 
-  const reviewTo = (ply: number) => {
+  const resign = () => {
+    if (result || reviewing || engineError) return;
+    setResignConfirm(true);
+  };
+
+  const confirmResign = () => {
+    setResignConfirm(false);
     hintRequestRef.current++;
+    hintAbortRef.current?.abort();
+    hintAbortRef.current = null;
+    const winner: Side = turn === "red" ? "black" : "red";
+    setSelected(null);
+    setTargets([]);
+    setHint(null);
+    setMoving(null);
+    setResult({
+      winner,
+      message: `${turn === "red" ? "红方" : "黑方"}认输，${winner === "red" ? "红方" : "黑方"}取胜`,
+    });
+    setResultDismissed(false);
+  };
+
+  const reviewTo = (ply: number) => {    hintRequestRef.current++;
     hintAbortRef.current?.abort();
     hintAbortRef.current = null;
     setRuleNotice(null);
@@ -425,6 +457,7 @@ export default function Home() {
     setTargets([]);
     setResultDismissed(true);
     setHint(null);
+    setMoving(null);
   };
 
   const requestHint = () => {
@@ -475,6 +508,21 @@ export default function Home() {
     capturedByRed: history.filter((item) => item.mover.side === "red" && item.captured),
     capturedByBlack: history.filter((item) => item.mover.side === "black" && item.captured),
   }), [history]);
+
+  const materialDiff = useMemo(() => {
+    const weight: Record<string, number> = { R: 9, N: 4, C: 4, B: 2, A: 2, P: 1, K: 0 };
+    let red = 0;
+    let black = 0;
+    for (const row of board) {
+      for (const piece of row) {
+        if (!piece) continue;
+        if (piece.side === "red") red += weight[piece.t];
+        else black += weight[piece.t];
+      }
+    }
+    return red - black;
+  }, [board]);
+
   const topSide: Side = flipped ? "red" : "black";
   const bottomSide: Side = flipped ? "black" : "red";
 
@@ -560,7 +608,7 @@ export default function Home() {
       </header>
 
       <section className="game-layout" id="game">
-        <div className="board-column">
+        <div className="board-column" style={restored ? undefined : { visibility: "hidden" }} aria-busy={!restored}>
           {renderPlayer(topSide, true)}
 
           <ChessBoard
@@ -574,6 +622,8 @@ export default function Home() {
             targets={targets}
             lastMove={visibleLastMove}
             hint={hint}
+            moving={moving}
+            onMoveDone={handleMoveDone}
             onChoose={choosePoint}
           />
 
@@ -624,6 +674,12 @@ export default function Home() {
             <button type="button" onClick={requestHint} disabled={!!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === "black")} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
             <button type="button" onClick={undo} disabled={!history.length || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
             <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
+            <button
+              type="button"
+              onClick={resign}
+              disabled={!!result || !!engineError || reviewing}
+              aria-label="认输"
+            >⚑ <span>认输</span></button>
             <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>
           </div>
 
@@ -660,6 +716,12 @@ export default function Home() {
 
             {history.some((item) => item.captured) ? (
               <div className="capture-summary">
+                <div className="material-balance">
+                  <small>子力对比</small>
+                  <span className={materialDiff > 0 ? "balance-red" : materialDiff < 0 ? "balance-black" : ""}>
+                    {materialDiff === 0 ? "势均力敌" : materialDiff > 0 ? `红方 +${materialDiff}` : `黑方 +${-materialDiff}`}
+                  </span>
+                </div>
                 <div className="red-captures"><small>红方俘获</small><span>{capturedByRed.map((item, index) => <i className="captured-black" key={index}>{NAMES.black[item.captured!.t]}</i>)}</span></div>
                 <div className="black-captures"><small>黑方俘获</small><span>{capturedByBlack.map((item, index) => <i className="captured-red" key={index}>{NAMES.red[item.captured!.t]}</i>)}</span></div>
               </div>
@@ -676,6 +738,7 @@ export default function Home() {
             {Array.from({ length: 12 }, (_, index) => <span key={index} />)}
           </div>
           <div className="outcome-card">
+            <button type="button" className="dialog-close" onClick={() => setResultDismissed(true)} aria-label="关闭">✕</button>
             <div className="outcome-seal" aria-hidden="true"><span>{isDraw ? "和" : lostToComputer ? "敗" : "勝"}</span></div>
             <small>{isDraw ? "纹枰论道 · 握手言和" : lostToComputer ? "胜败乃兵家常事" : "妙手定乾坤"}</small>
             <h2 id="outcome-title">{outcomeTitle}</h2>
@@ -683,6 +746,21 @@ export default function Home() {
             <div className="outcome-actions">
               <button type="button" onClick={() => startNewGame()} autoFocus>再来一局</button>
               <button type="button" onClick={() => reviewTo(history.length)}>复盘棋局</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {resignConfirm ? (
+        <div className="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="resign-title">
+          <div className="confirm-card">
+            <button type="button" className="dialog-close" onClick={() => setResignConfirm(false)} aria-label="关闭">✕</button>
+            <div className="confirm-seal" aria-hidden="true"><span>認</span></div>
+            <h2 id="resign-title">确定认输？</h2>
+            <p>当前轮到{turn === "red" ? "红方" : "黑方"}行棋，认输将判{turn === "red" ? "黑方" : "红方"}取胜，且不可撤销。</p>
+            <div className="confirm-actions">
+              <button type="button" onClick={confirmResign} autoFocus>确定认输</button>
+              <button type="button" onClick={() => setResignConfirm(false)}>继续对局</button>
             </div>
           </div>
         </div>
