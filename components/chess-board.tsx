@@ -114,8 +114,16 @@ function ChessBoardView({
     <div className="board-frame" aria-label="中国象棋棋盘">
       <div className="board-surface">
         <div className="board-lines" aria-hidden="true">
-          <span className="palace palace-top" />
-          <span className="palace palace-bottom" />
+          <svg className="board-grid-lines" viewBox="0 0 800 900" preserveAspectRatio="none">
+            <path className="board-outline" d="M0 0H800V900H0Z" />
+            {Array.from({ length: 8 }, (_, index) => (
+              <path key={`row-${index}`} d={`M0 ${(index + 1) * 100}H800`} />
+            ))}
+            {Array.from({ length: 7 }, (_, index) => (
+              <path key={`col-${index}`} d={`M${(index + 1) * 100} 0V400M${(index + 1) * 100} 500V900`} />
+            ))}
+            <path d="M300 0L500 200M500 0L300 200M300 700L500 900M500 700L300 900" />
+          </svg>
           <span className="river"><b>楚 河</b><b>漢 界</b></span>
         </div>
         <div
