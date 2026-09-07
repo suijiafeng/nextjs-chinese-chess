@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  aiBestMove,
   cloneBoard,
   findKing,
   inCheck,
@@ -155,5 +156,50 @@ describe("和棋裁定", () => {
     place(board, 0, 4, { side: "black", t: "K" });
     place(board, 6, 4, { side: "red", t: "P" });
     expect(materialDrawAdjudication(board)).toBeNull();
+  });
+});
+
+
+describe("电脑搜索", () => {
+  function tacticalBoard() {
+    const board = emptyBoard();
+    place(board, 0, 4, { t: "K", side: "black" });
+    place(board, 9, 4, { t: "K", side: "red" });
+    place(board, 5, 4, { t: "P", side: "black" });
+    place(board, 4, 0, { t: "R", side: "black" });
+    place(board, 4, 3, { t: "C", side: "red" });
+    return board;
+  }
+
+  it("搜索超时也保留原棋盘，并返回合法着法", () => {
+    const board = tacticalBoard();
+    const before = cloneBoard(board);
+    let calls = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => ++calls < 4 ? 0 : 1000);
+    try {
+      const move = aiBestMove(board, { difficulty: "hard", timeMs: 100 });
+      expect(calls).toBeGreaterThanOrEqual(4);
+      expect(board).toEqual(before);
+      expect(move).not.toBeNull();
+      const [fr, fc, tr, tc] = move!;
+      expect(board[fr][fc]?.side).toBe("black");
+      expect(legalMoves(board, fr, fc)).toContainEqual([tr, tc]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("能吃无保护的炮，但不会用车换有车保护的炮", () => {
+    const board = tacticalBoard();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      expect(aiBestMove(board, { difficulty: "beginner" })).toEqual([4, 0, 4, 3]);
+      place(board, 4, 6, { t: "R", side: "red" });
+      const before = cloneBoard(board);
+      expect(aiBestMove(board, { difficulty: "beginner" })).not.toEqual([4, 0, 4, 3]);
+      expect(board).toEqual(before);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

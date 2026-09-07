@@ -2,7 +2,7 @@ import { aiBestMove } from "./chess";
 import type { AiDifficulty, AiOptions, AiSearchProgress, Board } from "./chess";
 import { disposePikafish, pikafishBestMove } from "./pikafish";
 
-export type AiLevel = AiDifficulty | "grandmaster";
+export type AiLevel = AiDifficulty | "master" | "grandmaster";
 export type EngineMove = [number, number, number, number];
 
 export const AI_LEVEL_LABEL: Record<AiLevel, string> = {
@@ -14,17 +14,11 @@ export const AI_LEVEL_LABEL: Record<AiLevel, string> = {
 };
 
 export const AI_LEVEL_NOTE: Record<AiLevel, string> = {
-  beginner: "约2层 · 快速思考 · 偶尔选择次优着",
-  standard: "约4层 · 攻守均衡 · 适合日常对弈",
-  hard: "最高约6层 · 深入计算 · 更重视连续战术",
-  master: "最高约8层 · 动态用时 · 强化攻防与残局判断",
-  grandmaster: "Pikafish NNUE · 浏览器多核计算 · 普通玩家极难战胜",
-};
-
-const AI_SEARCH_MS: Record<Exclude<AiLevel, "master" | "grandmaster">, number> = {
-  beginner: 60,
-  standard: 200,
-  hard: 500,
+  beginner: "最高约2层 · 200～350ms预算 · 偶尔选择次优着",
+  standard: "最高约4层 · 500ms～1秒预算 · 攻守均衡",
+  hard: "最高约10层 · 最多3秒思考 · 加强连续战术",
+  master: "Pikafish NNUE · 浏览器多核计算 · 最多5秒思考",
+  grandmaster: "Pikafish NNUE · 浏览器多核计算 · 最多10秒思考",
 };
 
 type AiWorkerMessage = {
@@ -178,20 +172,20 @@ export async function analyzeAtLevel(
   board: Board,
   level: AiLevel,
   options: Omit<AiOptions, "difficulty">,
-  grandmasterTimeMs: number,
-  onGrandmasterReady?: () => void,
+  pikafishTimeMs: number,
+  onPikafishReady?: () => void,
   onProgress?: (progress: AiSearchProgress) => void,
   signal?: AbortSignal,
 ) {
-  if (level !== "grandmaster") {
+  if (level !== "master" && level !== "grandmaster") {
     return analyzeMove(board, { ...options, difficulty: level }, onProgress, signal);
   }
   try {
     return await pikafishBestMove(
       board,
       options.side ?? "black",
-      grandmasterTimeMs,
-      onGrandmasterReady,
+      pikafishTimeMs,
+      onPikafishReady,
       (progress) => onProgress?.({
         depth: progress.depth ?? 0,
         nodes: progress.nodes ?? 0,
@@ -202,18 +196,25 @@ export async function analyzeAtLevel(
     );
   } catch (error) {
     if (isAbortError(error)) throw error;
-    console.warn("宗师引擎不可用，已切换为大师兼容模式。", error);
+    console.warn("Pikafish 引擎不可用，已切换为困难兼容模式。", error);
     return analyzeMove(
       board,
-      { ...options, difficulty: "master", timeMs: Math.min(options.timeMs ?? 800, 800) },
+      { ...options, difficulty: "hard", timeMs: Math.min(options.timeMs ?? 800, 800) },
       onProgress,
       signal,
     );
   }
 }
 
-export function aiSearchBudget(level: AiLevel, blackTime: number) {
-  if (level === "master") return Math.min(1500, Math.max(800, blackTime * 2));
-  if (level === "grandmaster") return Math.min(2200, Math.max(1200, blackTime * 3));
-  return AI_SEARCH_MS[level];
+export function aiSearchBudget(level: AiLevel, remainingSeconds: number) {
+  // 棋时充足时使用上限；不足五分钟时逐渐收紧低难度预算。
+  const clockRatio = Math.min(1, Math.max(0, remainingSeconds / 300));
+  const target = level === "beginner" ? 200 + 150 * clockRatio
+    : level === "standard" ? 500 + 500 * clockRatio
+    : level === "hard" ? 3000
+    : level === "master" ? 5000
+    : 10000;
+  // 紧急读秒时允许低于常规预算，给落子留下余量。
+  const clockBudget = Math.max(30, remainingSeconds * 1000 * 0.05);
+  return Math.round(Math.min(target, clockBudget));
 }

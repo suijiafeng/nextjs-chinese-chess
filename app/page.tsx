@@ -106,7 +106,7 @@ export default function Home() {
   const [flipped, setFlipped] = useState(false);
   const [mode, setMode] = useState<GameMode>("ai");
   const [aiDifficulty, setAiDifficulty] = useState<AiLevel>("standard");
-  const [grandmasterReady, setGrandmasterReady] = useState(false);
+  const [pikafishReady, setPikafishReady] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
   const [aiThinking, setAiThinking] = useState(false);
   const [hintThinking, setHintThinking] = useState(false);
@@ -364,7 +364,7 @@ export default function Home() {
           history,
           side: "black",
           timeMs: searchBudget,
-        }, searchBudget, () => setGrandmasterReady(true), undefined, controller.signal);
+        }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (cancelled) return;
         if (move) commitMove([move[0], move[1]], [move[2], move[3]], "ai");
         else setResult({ winner: "red", message: "黑方无子可走，红方取胜" });
@@ -467,6 +467,7 @@ export default function Home() {
     hintAbortRef.current = controller;
     setHintThinking(true);
     const requestId = ++hintRequestRef.current;
+    const searchBudget = aiSearchBudget(aiDifficulty, timesRef.current[turn]);
     setHint(null);
     setSelected(null);
     setTargets([]);
@@ -475,8 +476,8 @@ export default function Home() {
         const move = await analyzeAtLevel(board, aiDifficulty, {
           history,
           side: turn,
-          timeMs: aiDifficulty === "master" ? 2000 : undefined,
-        }, 3000, () => setGrandmasterReady(true), undefined, controller.signal);
+          timeMs: searchBudget,
+        }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
         const from: Coord = [move[0], move[1]];
@@ -568,7 +569,7 @@ export default function Home() {
     ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
     : result?.message
     ?? (aiThinking
-      ? aiDifficulty === "grandmaster" && !grandmasterReady
+      ? (aiDifficulty === "master" || aiDifficulty === "grandmaster") && !pikafishReady
         ? "首次加载约 51MB 神经网络，完成后会由浏览器缓存"
         : "请稍候，对手正在推演棋路"
       : hintThinking

@@ -351,7 +351,7 @@ export function materialDrawAdjudication(board: Board): AdjudicationResult | nul
 }
 
 // ---------- AI：迭代加深 + Alpha-Beta + 静态搜索 ----------
-export type AiDifficulty = "beginner" | "standard" | "hard" | "master";
+export type AiDifficulty = "beginner" | "standard" | "hard";
 
 export interface AiSearchProgress {
   depth: number;
@@ -405,10 +405,9 @@ const MOBILITY_VALUE: Record<PieceType, number> = { K: 1, R: 2, C: 3, N: 4, B: 1
 const MATE_SCORE = 1_000_000;
 const SEARCH_TIMEOUT = Symbol("search-timeout");
 const AI_LIMITS: Record<AiDifficulty, { maxDepth: number; timeMs: number; randomWindow: number }> = {
-  beginner: { maxDepth: 2, timeMs: 60, randomWindow: 130 },
-  standard: { maxDepth: 4, timeMs: 200, randomWindow: 0 },
-  hard: { maxDepth: 6, timeMs: 500, randomWindow: 0 },
-  master: { maxDepth: 8, timeMs: 1500, randomWindow: 0 },
+  beginner: { maxDepth: 2, timeMs: 350, randomWindow: 130 },
+  standard: { maxDepth: 4, timeMs: 1000, randomWindow: 0 },
+  hard: { maxDepth: 10, timeMs: 3000, randomWindow: 0 },
 };
 
 // Worker 长驻时保留安全的着法排序经验；局面分值仍按每次搜索重新计算。
@@ -602,88 +601,6 @@ function lastOwnRecord(history: AdjudicationMove[], side: Side): AdjudicationMov
   }
 }
 
-/** 沿该棋子来路回溯，统计本方已连续走动它的次数。 */
-function samePieceStreak(history: AdjudicationMove[], move: AiMove, side: Side): number {
-  let streak = 0;
-  let square = move.from;
-  for (let index = history.length - 1; index >= 0; index--) {
-    const record = history[index];
-    if (record.mover.side !== side) continue;
-    if (record.to[0] !== square[0] || record.to[1] !== square[1]) break;
-    streak++;
-    square = record.from;
-  }
-  return streak;
-}
-
-function isReverseOfLastOwn(history: AdjudicationMove[], move: AiMove, side: Side): boolean {
-  const lastOwn = lastOwnRecord(history, side);
-  if (!lastOwn) return false;
-  return lastOwn.to[0] === move.from[0] && lastOwn.to[1] === move.from[1]
-    && lastOwn.from[0] === move.to[0] && lastOwn.from[1] === move.to[1];
-}
-
-/** 统计最近几步里，本方的将军是否都来自同一只棋。 */
-function recentCheckStreak(history: AdjudicationMove[], move: AiMove, side: Side): number {
-  let streak = 0;
-  for (let index = history.length - 1; index >= 0 && streak < 4; index--) {
-    const record = history[index];
-    if (record.mover.side !== side) continue;
-    if (!record.check) break;
-    if (record.from[0] === move.from[0] && record.from[1] === move.from[1]) {
-      streak++;
-    } else {
-      break;
-    }
-  }
-  return streak;
-}
-
-/**
- * 安静局面里连续走同一只棋、或原路退回时扣分。
- * 吃子、将军或己方已被将时不扣，避免耽误应手。
- */
-function idlePiecePenalty(
-  history: AdjudicationMove[],
-  move: AiMove,
-  side: Side,
-  inCheckNow: boolean,
-): number {
-  if (inCheckNow || move.captured || move.check) return 0;
-  const streak = samePieceStreak(history, move, side);
-  if (streak <= 0) return 0;
-  let penalty = 55 * streak;
-  if (isReverseOfLastOwn(history, move, side)) penalty += 85;
-  return Math.min(180, penalty);
-}
-
-/**
- * 反复用同一只棋将军时扣分。
- * 吃子将军、将位已被挪动或刚被应将时不扣，避免误伤真正的杀着。
- */
-function perpetualCheckPenalty(
-  history: AdjudicationMove[],
-  move: AiMove,
-  side: Side,
-  inCheckNow: boolean,
-): number {
-  if (!move.check || inCheckNow) return 0;
-  const streak = recentCheckStreak(history, move, side);
-  if (streak <= 0) return 0;
-  const penalty = 160 * streak + (move.captured ? -60 : 0);
-  return Math.min(600, Math.max(0, penalty));
-}
-
-function rootMovePenalty(
-  history: AdjudicationMove[],
-  move: AiMove,
-  side: Side,
-  inCheckNow: boolean,
-): number {
-  return idlePiecePenalty(history, move, side, inCheckNow)
-    + perpetualCheckPenalty(history, move, side, inCheckNow);
-}
-
 function preferScore(side: Side, score: number) {
   return side === "black" ? score : -score;
 }
@@ -817,16 +734,24 @@ function quiescence(
   beta: number,
   context: SearchContext,
   depth: number,
+  ply = 0,
+  path = new Set<string>(),
 ): number {
   ensureSearchTime(context);
+  if (!findKing(board, "black")) return -MATE_SCORE + ply;
+  if (!findKing(board, "red")) return MATE_SCORE - ply;
+  const key = positionKey(board, side);
+  if (path.has(key)) return 0;
   const stand = cachedEvaluation(board, context);
   const checked = inCheck(board, side);
-  const allMoves = checked ? generateAiMoves(board, side) : [];
-  if (checked && !allMoves.length) return side === "black" ? -MATE_SCORE : MATE_SCORE;
+  const allMoves = generateAiMoves(board, side);
+  if (!allMoves.length) return side === "black" ? -MATE_SCORE + ply : MATE_SCORE - ply;
+  // 应将仍继续展开，但限制连续将军，避免循环耗尽预算。
+  if (ply >= 16) return stand;
   if (depth <= 0 && !checked) return stand;
   const tacticalMoves = checked
     ? allMoves
-    : generateAiMoves(board, side).filter(({ captured, check }) => captured || check);
+    : allMoves.filter(({ captured, check }) => captured || (check && depth >= 5));
 
   if (side === "black") {
     let best = checked ? -Infinity : stand;
@@ -834,8 +759,14 @@ function quiescence(
     alpha = Math.max(alpha, best);
     for (const move of tacticalMoves) {
       makeMove(board, move);
-      const score = quiescence(board, "red", alpha, beta, context, depth - 1);
-      unmakeMove(board, move);
+      let score: number;
+      path.add(key);
+      try {
+        score = quiescence(board, "red", alpha, beta, context, depth - 1, ply + 1, path);
+      } finally {
+        path.delete(key);
+        unmakeMove(board, move);
+      }
       best = Math.max(best, score);
       alpha = Math.max(alpha, best);
       if (alpha >= beta) break;
@@ -848,8 +779,14 @@ function quiescence(
   beta = Math.min(beta, best);
   for (const move of tacticalMoves) {
     makeMove(board, move);
-    const score = quiescence(board, "black", alpha, beta, context, depth - 1);
-    unmakeMove(board, move);
+    let score: number;
+    path.add(key);
+    try {
+      score = quiescence(board, "black", alpha, beta, context, depth - 1, ply + 1, path);
+    } finally {
+      path.delete(key);
+      unmakeMove(board, move);
+    }
     best = Math.min(best, score);
     beta = Math.min(beta, best);
     if (alpha >= beta) break;
@@ -874,7 +811,7 @@ function alphaBeta(
   if (!findKing(board, "black")) return -MATE_SCORE + ply;
   if (!findKing(board, "red")) return MATE_SCORE - ply;
   if (materialDrawAdjudication(board)) return 0;
-  if (depth <= 0) return quiescence(board, side, alpha, beta, context, 1);
+  if (depth <= 0) return quiescence(board, side, alpha, beta, context, 6);
 
   const tableKey = zobristKey(board, side);
   const cached = context.table.get(tableKey);
@@ -897,8 +834,12 @@ function alphaBeta(
     for (const move of moves) {
       const nextSide: Side = side === "black" ? "red" : "black";
       makeMove(board, move);
-      const result = alphaBeta(board, nextSide, depth - 1, alpha, beta, ply + 1, context, path);
-      unmakeMove(board, move);
+      let result: number;
+      try {
+        result = alphaBeta(board, nextSide, depth - 1, alpha, beta, ply + 1, context, path);
+      } finally {
+        unmakeMove(board, move);
+      }
       if ((side === "black" && result > value) || (side === "red" && result < value)) {
         value = result;
         bestMove = move;
@@ -923,6 +864,8 @@ function alphaBeta(
 }
 
 export function aiBestMove(board: Board, options: AiOptions = {}): [number, number, number, number] | null {
+  // 搜索拥有独立棋盘，兼容模式也不能修改调用者状态。
+  board = cloneBoard(board);
   const difficulty = options.difficulty ?? "standard";
   const side = options.side ?? "black";
   const limits = AI_LIMITS[difficulty];
@@ -938,7 +881,7 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
   const history = options.history ?? [];
   const lastOwn = lastOwnRecord(history, side);
   const rootKey = zobristKey(board, side);
-  const rootMoves = generateAiMoves(
+  const generated = generateAiMoves(
     board,
     side,
     ROOT_MOVE_HINTS.get(rootKey),
@@ -946,6 +889,26 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
     0,
     lastOwn?.to,
   );
+  const initialKey = positionKey(initialBoard(), "red");
+  const adjudications = new Map<AiMove, ReturnType<typeof repetitionAdjudication>>();
+  const rootMoves = generated.filter((move) => {
+    makeMove(board, move);
+    try {
+      const record: AdjudicationMove = {
+        mover: move.mover, from: move.from, to: move.to,
+        captured: move.captured, check: move.check,
+        positionKey: positionKey(board, side === "black" ? "red" : "black"),
+        chaseCandidates: chaseCandidates(board, move.to, move.check),
+      };
+      if (isPerpetualCheckMove(initialKey, history, record)
+        || isPerpetualChaseMove(initialKey, history, record)) return false;
+      adjudications.set(move, repetitionAdjudication(initialKey, [...history, record])
+        ?? naturalMoveAdjudication([...history, record]));
+      return true;
+    } finally {
+      unmakeMove(board, move);
+    }
+  });
   if (!rootMoves.length) return null;
   const kingCapture = rootMoves.find(({ captured }) => captured?.t === "K");
   if (kingCapture) return [kingCapture.from[0], kingCapture.from[1], kingCapture.to[0], kingCapture.to[1]];
@@ -967,34 +930,21 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
       let rootBeta = Infinity;
       for (const move of rootMoves) {
         makeMove(board, move);
-        const synthetic: AdjudicationMove = {
-          mover: move.mover,
-          from: move.from,
-          to: move.to,
-          captured: move.captured,
-          check: move.check,
-          positionKey: positionKey(board, side === "black" ? "red" : "black"),
-          chaseCandidates: chaseCandidates(board, move.to, move.check),
-        };
-        const banned = isPerpetualCheckMove(positionKey(initialBoard(), "red"), history, synthetic)
-          || isPerpetualChaseMove(positionKey(initialBoard(), "red"), history, synthetic);
-        const adjudication = banned
-          ? { winner: side === "black" ? "red" as Side : "black" as Side, message: "" }
-          : repetitionAdjudication(positionKey(initialBoard(), "red"), [...history, synthetic])
-            ?? naturalMoveAdjudication([...history, synthetic]);
-        const score = adjudication
-          ? adjudication.winner === "black" ? MATE_SCORE : adjudication.winner === "red" ? -MATE_SCORE : 0
-          : alphaBeta(
-            board,
-            side === "black" ? "red" : "black",
-            depth - 1,
-            rootAlpha,
-            rootBeta,
-            1,
-            context,
-            historyPath,
-          );
-        unmakeMove(board, move);
+        let score: number;
+        try {
+          const adjudication = adjudications.get(move);
+          score = adjudication
+            ? adjudication.winner === "black" ? MATE_SCORE : adjudication.winner === "red" ? -MATE_SCORE : 0
+            : alphaBeta(
+              board, side === "black" ? "red" : "black", depth - 1,
+              // 入门会随机选择次优着，因此需要每个候选的完整分数。
+              difficulty === "beginner" ? -Infinity : rootAlpha,
+              difficulty === "beginner" ? Infinity : rootBeta,
+              1, context, historyPath,
+            );
+        } finally {
+          unmakeMove(board, move);
+        }
         iteration.push({ move, score });
         if (side === "black") rootAlpha = Math.max(rootAlpha, score);
         else rootBeta = Math.min(rootBeta, score);
@@ -1014,19 +964,13 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
     }
   }
 
-  const rootInCheck = inCheck(board, side);
-  const sign = side === "black" ? 1 : -1;
-  const ranked = completed.map(({ move, score }) => ({
-    move,
-    adjusted: score - sign * rootMovePenalty(history, move, side, rootInCheck),
-  }));
-  ranked.sort((left, right) => preferScore(side, right.adjusted) - preferScore(side, left.adjusted));
-  const bestAdjusted = ranked[0].adjusted;
+  // 剪枝结果可能只是分数边界，不能在搜索后再扣分并重新排名。
+  const bestScore = completed[0].score;
   const candidates = difficulty === "beginner"
-    ? ranked.filter(({ adjusted }) =>
-      preferScore(side, adjusted) >= preferScore(side, bestAdjusted) - limits.randomWindow).slice(0, 3)
-    : ranked.slice(0, 1);
-  const chosen = candidates[Math.floor(Math.random() * candidates.length)]?.move ?? ranked[0].move;
+    ? completed.filter(({ score }) =>
+      preferScore(side, score) >= preferScore(side, bestScore) - limits.randomWindow).slice(0, 3)
+    : completed.slice(0, 1);
+  const chosen = candidates[Math.floor(Math.random() * candidates.length)]?.move ?? completed[0].move;
   ROOT_MOVE_HINTS.set(rootKey, moveId(chosen));
   if (ROOT_MOVE_HINTS.size > 512) ROOT_MOVE_HINTS.delete(ROOT_MOVE_HINTS.keys().next().value!);
   for (const [id, value] of context.history) {
