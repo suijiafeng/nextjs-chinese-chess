@@ -61,6 +61,8 @@ const CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
 
 const SAVE_KEY = "changan-xiangqi-save-v1";
 const SETTINGS_KEY = "changan-xiangqi-settings-v1";
+const AI_FIRST_MOVE_DELAY = 3000;
+const AI_MIN_MOVE_DELAY = 1000;
 
 interface SaveData {
   version: 1;
@@ -151,9 +153,14 @@ export default function Home() {
   const [times, setTimes] = useState({ red: 900, black: 900 });
   const [reviewPly, setReviewPly] = useState<number | null>(null);
   const [moving, setMoving] = useState<MovingPiece | null>(null);
+  const [landing, setLanding] = useState<Coord | null>(null);
+  const [shaking, setShaking] = useState<Coord | null>(null);
   const [resignConfirm, setResignConfirm] = useState(false);
   const [restored, setRestored] = useState(false);
+  /** 点击棋盘上的「开始」后才计时、才让电脑走子。 */
+  const [started, setStarted] = useState(false);
   const [boardFullscreen, setBoardFullscreen] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [fullscreenError, setFullscreenError] = useState<string | null>(null);
   const fullscreenRef = useRef<HTMLElement>(null);
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
@@ -240,7 +247,9 @@ export default function Home() {
           if (data?.version === 1 && Array.isArray(data.board) && data.board.length === 10) {
             setBoard(data.board);
             setTurn(data.turn === "black" ? "black" : "red");
-            setHistory(Array.isArray(data.history) ? data.history : []);
+            const savedHistory = Array.isArray(data.history) ? data.history : [];
+            setHistory(savedHistory);
+            setStarted(savedHistory.length > 0 || !!data.result);
             const savedTimes = data.times ?? { red: 900, black: 900 };
             setTimes(savedTimes);
             timesRef.current = savedTimes;
@@ -354,6 +363,10 @@ export default function Home() {
     }
   }, [soundOn]);
 
+  const landingByAiRef = useRef(false);
+  /** 悔棋时需要依次倒放多步，排队等上一段动画结束再播下一段。 */
+  const movingQueueRef = useRef<MovingPiece[]>([]);
+
   const startNewGame = useCallback((nextMode: GameMode = mode, nextSide: Side = playerSide) => {
     hintRequestRef.current++;
     hintAbortRef.current?.abort();
@@ -375,11 +388,38 @@ export default function Home() {
     setHint(null);
     setTimes({ red: 900, black: 900 });
     setReviewPly(null);
+    movingQueueRef.current = [];
     setMoving(null);
-    playSound("start", { side: null });
-  }, [mode, playSound, playerSide]);
+    setStarted(false);
+  }, [mode, playerSide]);
 
-  const handleMoveDone = useCallback(() => setMoving(null), []);
+  const beginGame = () => {
+    if (started) return;
+    setStarted(true);
+    playSound("start", { side: null });
+  };
+
+  const handleMoveDone = useCallback(() => {
+    const next = movingQueueRef.current.shift() ?? null;
+    setMoving((current) => {
+      if (current && landingByAiRef.current && !next) setLanding(current.to);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!landing) return;
+    const timer = window.setTimeout(() => setLanding(null), 700);
+    return () => window.clearTimeout(timer);
+  }, [landing]);
+
+  useEffect(() => {
+    if (!shaking) return;
+    const timer = window.setTimeout(() => setShaking(null), 360);
+    return () => window.clearTimeout(timer);
+  }, [shaking]);
+
+  const shake = useCallback((coord: Coord) => setShaking([coord[0], coord[1]]), []);
 
   const commitMove = useCallback((from: Coord, to: Coord, actor: "human" | "ai" = "human") => {
     const [fr, fc] = from;
@@ -420,6 +460,7 @@ export default function Home() {
       && isPerpetualChaseMove(positionKey(initialBoard(), "red"), history, record);
     if (isPerpetualCheck) {
       playSound("illegal", { side: turn });
+      shake(from);
       setRuleNotice("禁止长将：不能连续将军超过三次");
       setSelected(null);
       setTargets([]);
@@ -428,6 +469,7 @@ export default function Home() {
     }
     if (isPerpetualChase) {
       playSound("illegal", { side: turn });
+      shake(from);
       setRuleNotice("禁止长捉：不能连续捉同一子超过三次");
       setSelected(null);
       setTargets([]);
@@ -459,6 +501,9 @@ export default function Home() {
     setTurn(nextTurn);
     setReviewPly(null);
     setResult(gameResult);
+    landingByAiRef.current = actor === "ai";
+    setLanding(null);
+    movingQueueRef.current = [];
     setMoving({ piece: { ...piece }, from, to, captured });
     if (gameResult) setResultDismissed(false);
 
@@ -468,7 +513,7 @@ export default function Home() {
       else playSound(captured ? "capture" : "move", detail);
     }
     return true;
-  }, [board, history, playSound, turn]);
+  }, [board, history, playSound, shake, turn]);
 
   useEffect(() => {
     if (!ruleNotice) return;
@@ -477,7 +522,7 @@ export default function Home() {
   }, [ruleNotice]);
 
   useEffect(() => {
-    if (result || engineError || reviewing || hintThinking) return;
+    if (!started || result || engineError || reviewing || hintThinking) return;
     const timer = window.setInterval(() => {
       const remaining = Math.max(0, timesRef.current[turn] - 1);
       const nextTimes = { ...timesRef.current, [turn]: remaining };
@@ -493,7 +538,7 @@ export default function Home() {
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [engineError, hintThinking, mode, playSound, playerSide, result, reviewing, turn]);
+  }, [engineError, hintThinking, mode, playSound, playerSide, result, reviewing, started, turn]);
 
   useEffect(() => {
     if (!result) return;
@@ -508,10 +553,22 @@ export default function Home() {
   }, [aiSide, mode, playSound, result]);
 
   useEffect(() => {
-    if (mode !== "ai" || turn !== aiSide || result || engineError || reviewing) return;
+    if (!started || mode !== "ai" || turn !== aiSide || result || engineError || reviewing) return;
     const searchBudget = aiSearchBudget(aiDifficulty, timesRef.current[aiSide]);
     const controller = new AbortController();
     let cancelled = false;
+    // 电脑落子的最短间隔：开局第一手约 2 秒，之后每手不少于 1 秒，避免低难度瞬间落子显得仓促。
+    const minDelay = history.length <= 1 ? AI_FIRST_MOVE_DELAY : AI_MIN_MOVE_DELAY;
+    const thinkStart = Date.now();
+    const holdUntilMinDelay = () => new Promise<void>((resolve) => {
+      const remaining = minDelay - (Date.now() - thinkStart);
+      if (remaining <= 0) {
+        resolve();
+        return;
+      }
+      const hold = window.setTimeout(resolve, remaining);
+      controller.signal.addEventListener("abort", () => window.clearTimeout(hold), { once: true });
+    });
     const timer = window.setTimeout(async () => {
       if (cancelled) return;
       setAiThinking(true);
@@ -532,6 +589,8 @@ export default function Home() {
           }, 800, undefined, undefined, controller.signal);
           if (cancelled) return;
         }
+        await holdUntilMinDelay();
+        if (cancelled) return;
         if (chosen) commitMove([chosen[0], chosen[1]], [chosen[2], chosen[3]], "ai");
         else setResult({ winner: playerSide, message: `${aiSide === "red" ? "红方" : "黑方"}无子可走，${playerSide === "red" ? "红方" : "黑方"}取胜` });
       } catch (error) {
@@ -547,10 +606,10 @@ export default function Home() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [aiDifficulty, aiSide, board, commitMove, engineError, history, mode, playerSide, result, reviewing, turn]);
+  }, [aiDifficulty, aiSide, board, commitMove, engineError, history, mode, playerSide, result, reviewing, started, turn]);
 
   const choosePoint = useCallback((r: number, c: number) => {
-    if (result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
+    if (!started || result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
     const piece = board[r][c];
 
     if (selected && targets.some(([tr, tc]) => tr === r && tc === c)) {
@@ -562,11 +621,11 @@ export default function Home() {
       playSound("select", { side: turn, piece: piece.t });
       setSelected([r, c]);
       setTargets(legalMoves(board, r, c));
-    } else {
-      setSelected(null);
-      setTargets([]);
+    } else if (selected) {
+      // 点了不能走的位置：棋子抖一下，保持选中，避免玩家以为没反应。
+      shake(selected);
     }
-  }, [aiSide, aiThinking, board, commitMove, playSound, hintThinking, mode, result, reviewing, selected, targets, turn]);
+  }, [aiSide, aiThinking, board, commitMove, playSound, hintThinking, mode, result, reviewing, selected, shake, started, targets, turn]);
 
   const canUndo = history.length > (mode === "ai" && playerSide === "black" ? 1 : 0);
 
@@ -592,7 +651,17 @@ export default function Home() {
     setResultDismissed(false);
     setReviewPly(null);
     setHint(null);
-    setMoving(null);
+    // 倒放被撤销的着法：从最后一手开始，棋子沿原路退回。
+    const reversed = history.slice(restoreIndex).reverse().map((record): MovingPiece => ({
+      piece: { ...record.mover },
+      from: record.to,
+      to: record.from,
+      captured: null,
+    }));
+    landingByAiRef.current = false;
+    setLanding(null);
+    movingQueueRef.current = reversed.slice(1);
+    setMoving(reversed[0] ?? null);
     playSound("undo", { side: restore.turnBefore });
   };
 
@@ -627,11 +696,12 @@ export default function Home() {
     setTargets([]);
     setResultDismissed(true);
     setHint(null);
+    movingQueueRef.current = [];
     setMoving(null);
   };
 
   const requestHint = () => {
-    if (result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
+    if (!started || result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
     hintAbortRef.current?.abort();
     const controller = new AbortController();
     hintAbortRef.current = controller;
@@ -729,7 +799,24 @@ export default function Home() {
     );
   };
 
-  const statusTitle = engineError
+  const renderControls = (extraClass = "") => (
+    <div className={`control-row${extraClass ? ` ${extraClass}` : ""}`}>
+            <button type="button" onClick={requestHint} disabled={!started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
+            <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
+            <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
+            <button
+              type="button"
+              onClick={resign}
+              disabled={!started || !!result || !!engineError || reviewing}
+              aria-label="认输"
+            >⚑ <span>认输</span></button>
+            <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>
+          </div>
+  );
+
+  const statusTitle = !started && !result
+    ? "准备就绪"
+    : engineError
     ? "计算暂停"
     : ruleNotice
     ? "行棋受限"
@@ -745,7 +832,7 @@ export default function Home() {
         ? `${turn === "red" ? "红方" : "黑方"}被将军`
         : `${turn === "red" ? "红方" : "黑方"}行棋`;
   const statusLoading = !engineError && !reviewing && !result && (aiThinking || hintThinking);
-  const statusNote = engineError ?? ruleNotice ?? (reviewing
+  const statusNote = !started && !result ? "点击棋盘上的「开始」进入对局" : engineError ?? ruleNotice ?? (reviewing
     ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
     : result?.message
     ?? (aiThinking
@@ -813,15 +900,48 @@ export default function Home() {
             lastMove={visibleLastMove}
             hint={hint}
             moving={moving}
+            landing={landing}
+            shaking={shaking}
             onMoveDone={handleMoveDone}
             onChoose={choosePoint}
           />
+          {!started && !result && !reviewing ? (
+            <div className="ready-overlay">
+              <div className="ready-card">
+                <span className="ready-seal" aria-hidden="true">棋</span>
+                <small>
+                  {mode === "ai"
+                    ? `人机对弈 · 你执${playerSide === "red" ? "红先行" : "黑后行"} · ${AI_LEVEL_LABEL[aiDifficulty]}`
+                    : "双人对弈 · 红方先行"}
+                </small>
+                <button type="button" className="ready-button" onClick={beginGame} autoFocus>
+                  开始对局
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
+                </button>
+              </div>
+            </div>
+          ) : null}
           </div>
 
           {renderPlayer(bottomSide)}
+          {renderControls("controls-mobile")}
+          <button
+            type="button"
+            className="drawer-toggle"
+            aria-expanded={drawerOpen}
+            aria-controls="side-panel"
+            onClick={() => setDrawerOpen(true)}
+          >
+            <span>☰</span> 设置与着法记录<small>{history.length ? `${history.length} 手` : ""}</small>
+          </button>
         </div>
 
-        <aside className="side-panel">
+        {drawerOpen ? <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} aria-hidden="true" /> : null}
+        <aside className={`side-panel${drawerOpen ? " is-open" : ""}`} id="side-panel">
+          <div className="drawer-head">
+            <span>设置与着法记录</span>
+            <button type="button" className="dialog-close" onClick={() => setDrawerOpen(false)} aria-label="收起">✕</button>
+          </div>
           <div className="mode-switch" role="group" aria-label="选择对局模式">
             <button className={mode === "ai" ? "active" : ""} type="button" onClick={() => startNewGame("ai")}>人机对弈</button>
             <button className={mode === "local" ? "active" : ""} type="button" onClick={() => startNewGame("local")}>双人对弈</button>
@@ -869,28 +989,7 @@ export default function Home() {
             </div>
           ) : null}
 
-          <div className={`turn-card${result ? " game-over" : ""}${ruleNotice ? " rule-limited" : ""}`} role="status" aria-live="polite">
-            <div className="turn-title">
-              <span className={`mini-piece ${turn === "black" ? "black-mini" : ""}`}>{turn === "red" ? "帥" : "将"}</span>
-              <div>
-                <b>{statusTitle}{statusLoading ? <span className="status-loading" aria-hidden="true"><i /><i /><i /></span> : null}</b>
-                <small>{statusNote}</small>
-              </div>
-            </div>
-          </div>
-
-          <div className="control-row">
-            <button type="button" onClick={requestHint} disabled={!!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
-            <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
-            <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
-            <button
-              type="button"
-              onClick={resign}
-              disabled={!!result || !!engineError || reviewing}
-              aria-label="认输"
-            >⚑ <span>认输</span></button>
-            <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>
-          </div>
+          {renderControls("controls-desktop")}
 
           <div className="record-card">
             <div className="section-heading"><span>着法记录</span><small>{reviewing ? `${visiblePly} / ${history.length} 手` : `${history.length} 手`}</small></div>
@@ -923,7 +1022,7 @@ export default function Home() {
               <div className="empty-record"><span>拾</span><p>棋局尚未开始<br />落下第一子，记录便会出现在这里</p></div>
             )}
 
-            {history.some((item) => item.captured) ? (
+            {(
               <div className="capture-summary">
                 <div className="material-balance">
                   <small>子力对比</small>
@@ -931,12 +1030,11 @@ export default function Home() {
                     {materialDiff === 0 ? "势均力敌" : materialDiff > 0 ? `红方 +${materialDiff}` : `黑方 +${-materialDiff}`}
                   </span>
                 </div>
-                <div className="red-captures"><small>红方俘获</small><span>{capturedByRed.map((item, index) => <i className="captured-black" key={index}>{NAMES.black[item.captured!.t]}</i>)}</span></div>
-                <div className="black-captures"><small>黑方俘获</small><span>{capturedByBlack.map((item, index) => <i className="captured-red" key={index}>{NAMES.red[item.captured!.t]}</i>)}</span></div>
+                <div className="red-captures"><small>红方俘获</small><span>{capturedByRed.length ? capturedByRed.map((item, index) => <i className="captured-black" key={index}>{NAMES.black[item.captured!.t]}</i>) : <em>—</em>}</span></div>
+                <div className="black-captures"><small>黑方俘获</small><span>{capturedByBlack.length ? capturedByBlack.map((item, index) => <i className="captured-red" key={index}>{NAMES.red[item.captured!.t]}</i>) : <em>—</em>}</span></div>
               </div>
-            ) : null}
+            )}
           </div>
-          <p className="rule-note">本地开局棋谱已启用 · 禁止长将、长捉 · 将死、困毙与重复局面裁定</p>
         </aside>
       </section>
       <footer><span>落子无悔，静候知音</span><b>代码工匠 · 用代码打磨每一步</b></footer>
