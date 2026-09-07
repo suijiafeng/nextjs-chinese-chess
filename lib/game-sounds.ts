@@ -1,5 +1,45 @@
 export type GameSoundKind = "move" | "capture" | "check" | "win" | "lose" | "draw";
 
+/** 传给语音包的附加信息，音效本身不使用。 */
+export interface GameSoundDetail {
+  /** 触发该事件的一方；和棋等无归属事件为 null。 */
+  side: "red" | "black" | null;
+  actor?: "human" | "ai";
+  /** 着法记录，如“炮二平五”，可用于逐句报棋。 */
+  notation?: string;
+  piece?: string;
+}
+
+/**
+ * 人声扩展点：注册后，每次音效播放时都会收到同一事件，可叠加报棋、将军提示等人声。
+ * 未注册时行为与原先完全一致。
+ */
+export interface VoicePack {
+  play(kind: GameSoundKind, detail: GameSoundDetail): void;
+  dispose?(): void;
+}
+
+let voicePack: VoicePack | null = null;
+
+export function registerVoicePack(pack: VoicePack | null) {
+  voicePack?.dispose?.();
+  voicePack = pack;
+}
+
+/**
+ * 基于音频文件的语音包：clips 将事件映射到 URL，例如 { check: "/voice/check.mp3" }。
+ * 缺少对应片段的事件会被静默跳过。
+ */
+export function createClipVoicePack(clips: Partial<Record<GameSoundKind, string>>): VoicePack {
+  return {
+    play(kind) {
+      const url = clips[kind];
+      if (!url) return;
+      void new Audio(url).play().catch(() => undefined);
+    },
+  };
+}
+
 let sharedContext: AudioContext | null = null;
 
 function getContext(): AudioContext | null {
@@ -94,7 +134,12 @@ function chord(context: AudioContext, when: number, frequencies: number[], durat
  * - win      快速上行五声音阶 + 收尾轻敲
  * - lose     慢速下行低音，沉稳收束
  */
-export function playGameSound(kind: GameSoundKind) {
+export function playGameSound(kind: GameSoundKind, detail: GameSoundDetail = { side: null }) {
+  try {
+    voicePack?.play(kind, detail);
+  } catch {
+    // 语音包异常不影响基础音效。
+  }
   const context = getContext();
   if (!context) return;
 
@@ -139,6 +184,7 @@ export function playGameSound(kind: GameSoundKind) {
 }
 
 export function disposeGameSounds() {
+  voicePack?.dispose?.();
   void sharedContext?.close();
   sharedContext = null;
 }
