@@ -28,7 +28,10 @@ import {
 import type { AiLevel } from "@/lib/ai-client";
 import { ChessBoard } from "@/components/chess-board";
 import type { Coord, MovingPiece } from "@/components/chess-board";
-import { disposeGameSounds, playGameSound } from "@/lib/game-sounds";
+import { disposeGameSounds, playGameSound, setSoundVolume } from "@/lib/game-sounds";
+import { disposeMusic, setMusicVolume, startMusic, stopMusic } from "@/lib/game-music";
+import { SettingsPanel } from "@/components/settings-panel";
+import type { AudioSettings } from "@/components/settings-panel";
 import type { GameSoundDetail, GameSoundKind } from "@/lib/game-sounds";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -57,6 +60,7 @@ interface HintMove {
 const CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
 
 const SAVE_KEY = "changan-xiangqi-save-v1";
+const SETTINGS_KEY = "changan-xiangqi-settings-v1";
 
 interface SaveData {
   version: 1;
@@ -98,6 +102,30 @@ function moveNotation(piece: Piece, from: Coord, to: Coord) {
   return `${name}${origin}${action}${destination}`;
 }
 
+/** 这手棋是否触犯长将/长捉禁着；外部引擎（Pikafish）不认这条规则，落子前必须复核。 */
+function isBannedMove(board: Board, history: MoveRecord[], turn: Side, from: Coord, to: Coord) {
+  const piece = board[from[0]][from[1]];
+  if (!piece) return false;
+  const next = cloneBoard(board);
+  next[to[0]][to[1]] = { ...piece };
+  next[from[0]][from[1]] = null;
+  const nextTurn: Side = turn === "red" ? "black" : "red";
+  const gaveCheck = !!findKing(next, nextTurn) && inCheck(next, nextTurn);
+  const record: AdjudicationMove = {
+    mover: { ...piece },
+    from,
+    to,
+    captured: board[to[0]][to[1]] ? { ...board[to[0]][to[1]]! } : null,
+    check: gaveCheck,
+    positionKey: positionKey(next, nextTurn),
+    chaseCandidates: chaseCandidates(next, to, gaveCheck),
+  };
+  const initialKey = positionKey(initialBoard(), "red");
+  return gaveCheck
+    ? isPerpetualCheckMove(initialKey, history, record)
+    : isPerpetualChaseMove(initialKey, history, record);
+}
+
 export default function Home() {
   const [board, setBoard] = useState<Board>(() => initialBoard());
   const [turn, setTurn] = useState<Side>("red");
@@ -110,6 +138,9 @@ export default function Home() {
   const [playerSide, setPlayerSide] = useState<Side>("red");
   const [pikafishReady, setPikafishReady] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
+  const [musicOn, setMusicOn] = useState(false);
+  const [soundVolume, setSoundVolumeState] = useState(0.8);
+  const [musicVolume, setMusicVolumeState] = useState(0.6);
   const [aiThinking, setAiThinking] = useState(false);
   const [hintThinking, setHintThinking] = useState(false);
   const [hint, setHint] = useState<HintMove | null>(null);
@@ -233,6 +264,33 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        const raw = window.localStorage.getItem(SETTINGS_KEY);
+        if (!raw) return;
+        const saved = JSON.parse(raw) as Partial<Pick<AudioSettings, "soundVolume" | "musicVolume">>;
+        const clamp = (value: unknown, fallback: number) =>
+          typeof value === "number" && value >= 0 && value <= 1 ? value : fallback;
+        setSoundVolumeState((current) => clamp(saved.soundVolume, current));
+        setMusicVolumeState((current) => clamp(saved.musicVolume, current));
+      } catch {
+        // 设置损坏时使用默认值。
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    setSoundVolume(soundVolume);
+    setMusicVolume(musicVolume);
+    try {
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({ soundVolume, musicVolume }));
+    } catch {
+      // 存储不可用时忽略。
+    }
+  }, [musicVolume, soundVolume]);
+
+  useEffect(() => {
     if (!restored) return;
     const data: SaveData = {
       version: 1,
@@ -273,7 +331,19 @@ export default function Home() {
     hintAbortRef.current?.abort();
     disposeAiClient();
     disposeGameSounds();
+    disposeMusic();
   }, []);
+
+  const updateAudioSettings = (patch: Partial<AudioSettings>) => {
+    if (patch.soundOn !== undefined) setSoundOn(patch.soundOn);
+    if (patch.soundVolume !== undefined) setSoundVolumeState(patch.soundVolume);
+    if (patch.musicVolume !== undefined) setMusicVolumeState(patch.musicVolume);
+    if (patch.musicOn !== undefined) {
+      if (patch.musicOn) void startMusic();
+      else stopMusic();
+      setMusicOn(patch.musicOn);
+    }
+  };
 
   const playSound = useCallback((kind: GameSoundKind, detail?: GameSoundDetail) => {
     if (!soundOn) return;
@@ -306,7 +376,8 @@ export default function Home() {
     setTimes({ red: 900, black: 900 });
     setReviewPly(null);
     setMoving(null);
-  }, [mode, playerSide]);
+    playSound("start", { side: null });
+  }, [mode, playSound, playerSide]);
 
   const handleMoveDone = useCallback(() => setMoving(null), []);
 
@@ -348,6 +419,7 @@ export default function Home() {
     const isPerpetualChase = !gaveCheck
       && isPerpetualChaseMove(positionKey(initialBoard(), "red"), history, record);
     if (isPerpetualCheck) {
+      playSound("illegal", { side: turn });
       setRuleNotice("禁止长将：不能连续将军超过三次");
       setSelected(null);
       setTargets([]);
@@ -355,6 +427,7 @@ export default function Home() {
       return false;
     }
     if (isPerpetualChase) {
+      playSound("illegal", { side: turn });
       setRuleNotice("禁止长捉：不能连续捉同一子超过三次");
       setSelected(null);
       setTargets([]);
@@ -410,6 +483,9 @@ export default function Home() {
       const nextTimes = { ...timesRef.current, [turn]: remaining };
       timesRef.current = nextTimes;
       setTimes(nextTimes);
+      const humanClock = mode === "local" || turn === playerSide;
+      if (humanClock && (remaining === 60 || remaining === 30)) playSound("lowtime", { side: turn });
+      else if (humanClock && remaining > 0 && remaining <= 10) playSound("tick", { side: turn });
       if (remaining === 0) {
         const winner: Side = turn === "red" ? "black" : "red";
         setResult({ winner, message: `${turn === "red" ? "红方" : "黑方"}用时耗尽` });
@@ -417,7 +493,7 @@ export default function Home() {
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [engineError, hintThinking, result, reviewing, turn]);
+  }, [engineError, hintThinking, mode, playSound, playerSide, result, reviewing, turn]);
 
   useEffect(() => {
     if (!result) return;
@@ -426,7 +502,9 @@ export default function Home() {
       return;
     }
     const lostToComputer = mode === "ai" && result.winner === aiSide;
-    playSound(lostToComputer ? "lose" : "win", { side: result.winner });
+    const timedOut = result.message.includes("用时耗尽");
+    if (timedOut && (mode === "local" || lostToComputer)) playSound("timeout", { side: result.winner });
+    else playSound(lostToComputer ? "lose" : "win", { side: result.winner });
   }, [aiSide, mode, playSound, result]);
 
   useEffect(() => {
@@ -444,7 +522,17 @@ export default function Home() {
           timeMs: searchBudget,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (cancelled) return;
-        if (move) commitMove([move[0], move[1]], [move[2], move[3]], "ai");
+        let chosen = move;
+        if (chosen && isBannedMove(board, history, aiSide, [chosen[0], chosen[1]], [chosen[2], chosen[3]])) {
+          // Pikafish 选了长将/长捉着法：改用内置引擎，它会自行排除禁着。
+          chosen = await analyzeAtLevel(board, "hard", {
+            history,
+            side: aiSide,
+            timeMs: 800,
+          }, 800, undefined, undefined, controller.signal);
+          if (cancelled) return;
+        }
+        if (chosen) commitMove([chosen[0], chosen[1]], [chosen[2], chosen[3]], "ai");
         else setResult({ winner: playerSide, message: `${aiSide === "red" ? "红方" : "黑方"}无子可走，${playerSide === "red" ? "红方" : "黑方"}取胜` });
       } catch (error) {
         if (cancelled || isAbortError(error)) return;
@@ -471,13 +559,14 @@ export default function Home() {
     }
 
     if (piece?.side === turn) {
+      playSound("select", { side: turn, piece: piece.t });
       setSelected([r, c]);
       setTargets(legalMoves(board, r, c));
     } else {
       setSelected(null);
       setTargets([]);
     }
-  }, [aiSide, aiThinking, board, commitMove, hintThinking, mode, result, reviewing, selected, targets, turn]);
+  }, [aiSide, aiThinking, board, commitMove, playSound, hintThinking, mode, result, reviewing, selected, targets, turn]);
 
   const canUndo = history.length > (mode === "ai" && playerSide === "black" ? 1 : 0);
 
@@ -504,6 +593,7 @@ export default function Home() {
     setReviewPly(null);
     setHint(null);
     setMoving(null);
+    playSound("undo", { side: restore.turnBefore });
   };
 
   const resign = () => {
@@ -553,13 +643,22 @@ export default function Home() {
     setTargets([]);
     window.setTimeout(async () => {
       try {
-        const move = await analyzeAtLevel(board, aiDifficulty, {
+        let move = await analyzeAtLevel(board, aiDifficulty, {
           history,
           side: turn,
           timeMs: searchBudget,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
+        if (isBannedMove(board, history, turn, [move[0], move[1]], [move[2], move[3]])) {
+          const safe = await analyzeAtLevel(board, "hard", {
+            history,
+            side: turn,
+            timeMs: 800,
+          }, 800, undefined, undefined, controller.signal);
+          if (hintRequestRef.current !== requestId || !safe) return;
+          move = safe;
+        }
         const from: Coord = [move[0], move[1]];
         const to: Coord = [move[2], move[3]];
         const piece = board[from[0]][from[1]];
@@ -689,15 +788,11 @@ export default function Home() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" /></svg>
           </button>
           {!boardFullscreen && fullscreenError ? <span className="fullscreen-error" role="alert">{fullscreenError}</span> : null}
-          <button
-            className={`icon-button${soundOn ? "" : " sound-off"}`}
-            type="button"
-            aria-label={soundOn ? "关闭声音" : "开启声音"}
-            aria-pressed={soundOn}
-            onClick={() => setSoundOn((current) => !current)}
-          >
-            {soundOn ? "♪" : "♩"}
-          </button>
+          <SettingsPanel
+            settings={{ soundOn, soundVolume, musicOn, musicVolume }}
+            onChange={updateAudioSettings}
+            onPreviewSound={() => playSound("move")}
+          />
         </div>
       </header>
 
@@ -841,7 +936,7 @@ export default function Home() {
               </div>
             ) : null}
           </div>
-          <p className="rule-note">本地开局棋谱已启用 · 将死、困毙、长将长捉与重复局面裁定</p>
+          <p className="rule-note">本地开局棋谱已启用 · 禁止长将、长捉 · 将死、困毙与重复局面裁定</p>
         </aside>
       </section>
       <footer><span>落子无悔，静候知音</span><b>代码工匠 · 用代码打磨每一步</b></footer>
