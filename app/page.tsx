@@ -120,9 +120,79 @@ export default function Home() {
   const [moving, setMoving] = useState<MovingPiece | null>(null);
   const [resignConfirm, setResignConfirm] = useState(false);
   const [restored, setRestored] = useState(false);
+  const [boardFullscreen, setBoardFullscreen] = useState(false);
+  const [fullscreenError, setFullscreenError] = useState<string | null>(null);
+  const fullscreenRef = useRef<HTMLElement>(null);
+  const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
+  const exitFullscreenRef = useRef<HTMLButtonElement>(null);
+  const boardStageRef = useRef<HTMLDivElement>(null);
+  const gameLayoutRef = useRef<HTMLElement>(null);
   const hintRequestRef = useRef(0);
   const hintAbortRef = useRef<AbortController | null>(null);
   const timesRef = useRef(times);
+
+  useEffect(() => {
+    const stage = boardStageRef.current;
+    const layout = gameLayoutRef.current;
+    if (!stage || !layout) return;
+    const observer = new ResizeObserver(([entry]) => {
+      layout.style.setProperty("--board-height", `${entry.contentRect.height}px`);
+    });
+    observer.observe(stage);
+    return () => observer.disconnect();
+  }, []);
+
+  const exitBoardFullscreen = useCallback(async () => {
+    try {
+      if (document.fullscreenElement === fullscreenRef.current) {
+        await document.exitFullscreen();
+      }
+      setBoardFullscreen(false);
+      setFullscreenError(null);
+      fullscreenButtonRef.current?.focus();
+    } catch {
+      setFullscreenError("退出全屏失败，请按 Esc 重试。");
+    }
+  }, []);
+
+  const enterBoardFullscreen = async () => {
+    const element = fullscreenRef.current;
+    if (!element) return;
+    setFullscreenError(null);
+    try {
+      if (document.fullscreenEnabled && element.requestFullscreen) {
+        await element.requestFullscreen();
+      }
+      setBoardFullscreen(true);
+    } catch {
+      setFullscreenError("无法进入全屏，请重试或检查浏览器权限。");
+    }
+  };
+
+  useEffect(() => {
+    const syncFullscreen = () => {
+      const active = document.fullscreenElement === fullscreenRef.current;
+      setBoardFullscreen(active);
+      if (!active) fullscreenButtonRef.current?.focus();
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreen);
+  }, []);
+
+  useEffect(() => {
+    if (!boardFullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    exitFullscreenRef.current?.focus();
+    const handleEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") void exitBoardFullscreen();
+    };
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [boardFullscreen, exitBoardFullscreen]);
 
   useEffect(() => {
     timesRef.current = times;
@@ -588,14 +658,26 @@ export default function Home() {
       : `${result?.winner === "red" ? "红方" : "黑方"}胜`;
 
   return (
-    <main className="game-shell">
+    <main ref={fullscreenRef} className={`game-shell${boardFullscreen ? " is-fullscreen" : ""}`}>
+          {boardFullscreen ? (
+            <>
+              <button ref={exitFullscreenRef} className="icon-button fullscreen-button fullscreen-exit" type="button" aria-label="退出全屏" title="退出全屏（Esc）" onClick={exitBoardFullscreen}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 8h5V3M21 8h-5V3M16 21v-5h5M8 21v-5H3" /></svg>
+              </button>
+              {fullscreenError ? <span className="fullscreen-error" role="alert">{fullscreenError}</span> : null}
+            </>
+          ) : null}
+
       <header className="topbar">
         <a className="brand" href="#game" aria-label="长安棋社首页">
           <span className="brand-seal">棋</span>
           <span><strong>长安棋社</strong><small>CHANG&apos;AN XIANGQI</small></span>
         </a>
         <div className="top-actions">
-          <span className="room-tag"><i /> 经典对局</span>
+          <button ref={fullscreenButtonRef} className="icon-button fullscreen-button" type="button" aria-label="对局全屏" title="对局全屏" disabled={!restored} onClick={enterBoardFullscreen}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" /></svg>
+          </button>
+          {!boardFullscreen && fullscreenError ? <span className="fullscreen-error" role="alert">{fullscreenError}</span> : null}
           <button
             className={`icon-button${soundOn ? "" : " sound-off"}`}
             type="button"
@@ -608,10 +690,11 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="game-layout" id="game">
+      <section ref={gameLayoutRef} className="game-layout" id="game">
         <div className="board-column" style={restored ? undefined : { visibility: "hidden" }} aria-busy={!restored}>
           {renderPlayer(topSide, true)}
 
+          <div ref={boardStageRef} className="board-stage">
           <ChessBoard
             board={visibleBoard}
             turn={visibleTurn}
@@ -627,6 +710,7 @@ export default function Home() {
             onMoveDone={handleMoveDone}
             onChoose={choosePoint}
           />
+          </div>
 
           {renderPlayer(bottomSide)}
         </div>
