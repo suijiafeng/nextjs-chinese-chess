@@ -3,7 +3,7 @@
 import { cloneBoard, findKing, inCheck, initialBoard, legalMoves, NAMES } from "@/lib/chess";
 import type { AdjudicationMove, Board, ChaseCandidate, Side } from "@/lib/chess";
 import { isBannedMove, moveNotation, playMove, REJECTION_MESSAGE, replayMoves } from "@/lib/game-core";
-import { defaultLanHost, LanClient, loadLanSession } from "@/lib/lan-client";
+import { defaultLanHost, hasFixedServer, LanClient, loadLanSession } from "@/lib/lan-client";
 import type { LanSession } from "@/lib/lan-client";
 import type { RoomSnapshot } from "@/server/room";
 import {
@@ -490,6 +490,7 @@ export default function Home() {
   /** 邀请链接：主机名用服务地址，这样对方在别的设备上打开也能连上。 */
   const inviteLink = (() => {
     if (!lan.code || typeof window === "undefined") return "";
+    if (hasFixedServer()) return `${window.location.origin}/?room=${lan.code}`;
     const host = lanHost.trim() || window.location.hostname;
     const port = window.location.port ? `:${window.location.port}` : "";
     return `${window.location.protocol}//${host}${port}/?room=${lan.code}&host=${host}`;
@@ -680,6 +681,7 @@ export default function Home() {
             history,
             side: aiSide,
             timeMs: 800,
+            forceBuiltin: true,
           }, 800, undefined, undefined, controller.signal);
           if (cancelled) return;
         }
@@ -823,6 +825,7 @@ export default function Home() {
           history,
           side: turn,
           timeMs: searchBudget,
+          deterministic: true,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
@@ -831,6 +834,7 @@ export default function Home() {
             history,
             side: turn,
             timeMs: 800,
+            forceBuiltin: true,
           }, 800, undefined, undefined, controller.signal);
           if (hintRequestRef.current !== requestId || !safe) return;
           move = safe;
@@ -938,7 +942,7 @@ export default function Home() {
   const statusTitle = mode === "online" && lan.pendingUndo
     ? lan.pendingUndo === lan.side ? "等待对方同意悔棋" : "对方请求悔棋"
     : lanWaiting
-    ? lan.status === "idle" ? "局域网对弈" : lan.status === "joining" ? "正在连接" : "等待对手"
+    ? lan.status === "idle" ? (hasFixedServer() ? "联网对弈" : "局域网对弈") : lan.status === "joining" ? "正在连接" : "等待对手"
     : !started && !result
     ? "准备就绪"
     : engineError
@@ -960,12 +964,12 @@ export default function Home() {
   const statusNote = mode === "online" && lan.pendingUndo && !ruleNotice
     ? lan.pendingUndo === lan.side ? "对方同意后将撤回你的最后一手" : "同意后将撤回对方的最后一手"
     : lanWaiting && !ruleNotice
-    ? lan.status === "idle" ? "创建房间或输入房间码加入" : lan.status === "joining" ? "正在连接局域网服务…" : `房间码 ${lan.code}，等待对方加入`
+    ? lan.status === "idle" ? "创建房间或输入房间码加入" : lan.status === "joining" ? (hasFixedServer() ? "正在连接服务器…" : "正在连接局域网服务…") : `房间码 ${lan.code}，等待对方加入`
     : !started && !result ? "点击棋盘上的「开始」进入对局" : engineError ?? ruleNotice ?? (reviewing
     ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
     : result?.message
     ?? (aiThinking
-      ? (aiDifficulty === "master" || aiDifficulty === "grandmaster") && !pikafishReady
+      ? !pikafishReady
         ? "首次加载约 51MB 神经网络，完成后会由浏览器缓存"
         : "请稍候，对手正在推演棋路"
       : hintThinking
@@ -1040,11 +1044,13 @@ export default function Home() {
                 <span className="ready-seal" aria-hidden="true">棋</span>
                 {lan.status === "idle" ? (
                   <>
-                    <b>局域网对弈</b>
-                    <label className="lan-field">
-                      <span>服务地址</span>
-                      <input value={lanHost} onChange={(event) => setLanHost(event.target.value)} spellCheck={false} placeholder="运行 npm run lan 的电脑地址" />
-                    </label>
+                    <b>{hasFixedServer() ? "联网对弈" : "局域网对弈"}</b>
+                    {hasFixedServer() ? null : (
+                      <label className="lan-field">
+                        <span>服务地址</span>
+                        <input value={lanHost} onChange={(event) => setLanHost(event.target.value)} spellCheck={false} placeholder="运行 npm run lan 的电脑地址" />
+                      </label>
+                    )}
                     <div className="lan-actions">
                       <button type="button" className="ready-button" onClick={() => lanCreate("red")}>创建房间 · 执红</button>
                       <button type="button" className="ready-button ready-button-dark" onClick={() => lanCreate("black")}>创建房间 · 执黑</button>
@@ -1076,7 +1082,7 @@ export default function Home() {
                       <input value={inviteLink} readOnly aria-label="邀请链接" onFocus={(event) => event.target.select()} />
                       <button type="button" className={linkCopied ? "copied" : ""} onClick={copyInviteLink}>{linkCopied ? "已复制" : "复制链接"}</button>
                     </div>
-                    <small>对方在同一网络打开此链接即可加入</small>
+                    <small>{hasFixedServer() ? "把链接发给对方即可加入" : "对方在同一网络打开此链接即可加入"}</small>
                     <button type="button" className="lan-cancel" onClick={lanLeave}>离开房间</button>
                   </>
                 )}

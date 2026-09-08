@@ -59,6 +59,16 @@ function newToken() {
   return crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+/**
+ * 线上部署时通过 NEXT_PUBLIC_WS_URL 指定中转服务地址（如 wss://ws.example.com）。
+ * 未设置时按局域网方式：连页面所在主机的 3456 端口。
+ */
+export const FIXED_WS_URL = (process.env.NEXT_PUBLIC_WS_URL ?? "").trim().replace(/\/+$/, "");
+
+export function hasFixedServer() {
+  return FIXED_WS_URL.length > 0;
+}
+
 /** 页面地址里的主机名即服务所在机器；对方通过同一个地址打开页面即可。 */
 export function defaultLanHost() {
   if (typeof window === "undefined") return "localhost";
@@ -66,6 +76,7 @@ export function defaultLanHost() {
 }
 
 export function lanUrl(host: string) {
+  if (hasFixedServer()) return FIXED_WS_URL;
   const protocol = typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
   return `${protocol}://${host}:${DEFAULT_LAN_PORT}`;
 }

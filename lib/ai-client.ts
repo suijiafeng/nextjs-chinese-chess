@@ -1,6 +1,7 @@
 import { aiBestMove } from "./chess";
 import type { AiDifficulty, AiOptions, AiSearchProgress, Board } from "./chess";
-import { disposePikafish, pikafishBestMove } from "./pikafish";
+import { disposePikafish, pikafishAnalyze } from "./pikafish";
+import type { PikafishCandidate } from "./pikafish";
 
 export type AiLevel = AiDifficulty | "master" | "grandmaster";
 export type EngineMove = [number, number, number, number];
@@ -14,12 +15,50 @@ export const AI_LEVEL_LABEL: Record<AiLevel, string> = {
 };
 
 export const AI_LEVEL_NOTE: Record<AiLevel, string> = {
-  beginner: "最高约2层 · 200～350ms预算 · 偶尔选择次优着",
-  standard: "最高约4层 · 500ms～1秒预算 · 攻守均衡",
-  hard: "最高约10层 · 最多3秒思考 · 加强连续战术",
-  master: "Pikafish NNUE · 浏览器多核计算 · 最多5秒思考",
-  grandmaster: "Pikafish NNUE · 浏览器多核计算 · 最多10秒思考",
+  beginner: "2 层搜索 · 常走随手棋 · 刚学规则也能赢",
+  standard: "4 层搜索 · 偶有失误 · 业余爱好者",
+  hard: "7 层搜索 · 很少失误 · 需要认真应对",
+  master: "12 层搜索 · 不犯错 · 地方高手",
+  grandmaster: "全力 10 秒 · 远超人类",
 };
+
+/**
+ * 各档位的搜索计划。Pikafish 没有 Skill Level 选项，这里用「固定深度 + 多候选 + 按分差随机」限制棋力：
+ * window 是允许偏离最佳着的分数窗口（厘兵），temperature 越大越容易选到差着。
+ */
+export interface LevelPlan {
+  depth?: number;
+  multipv: number;
+  window: number;
+  temperature: number;
+  /** Pikafish 不可用时退回内置引擎的档位 */
+  fallback: AiDifficulty;
+}
+
+export const LEVEL_PLAN: Record<AiLevel, LevelPlan> = {
+  beginner: { depth: 2, multipv: 8, window: 300, temperature: 160, fallback: "beginner" },
+  standard: { depth: 4, multipv: 5, window: 150, temperature: 70, fallback: "standard" },
+  hard: { depth: 7, multipv: 3, window: 60, temperature: 28, fallback: "hard" },
+  master: { depth: 12, multipv: 1, window: 0, temperature: 1, fallback: "hard" },
+  grandmaster: { multipv: 1, window: 0, temperature: 1, fallback: "hard" },
+};
+
+/** 在最佳着附近按分差加权随机：分差越小权重越大；必胜/必败的局面不随机。 */
+export function pickCandidate(candidates: PikafishCandidate[], plan: LevelPlan, random = Math.random): EngineMove | null {
+  if (!candidates.length) return null;
+  const best = candidates[0];
+  if (plan.window <= 0 || (best.mate !== undefined && best.mate > 0)) return best.move;
+  const pool = candidates.filter((item) =>
+    best.score - item.score <= plan.window && (item.mate === undefined || item.mate > 0));
+  if (pool.length <= 1) return best.move;
+  const weights = pool.map((item) => Math.exp(-(best.score - item.score) / plan.temperature));
+  let roll = random() * weights.reduce((sum, weight) => sum + weight, 0);
+  for (let index = 0; index < pool.length; index++) {
+    roll -= weights[index];
+    if (roll <= 0) return pool[index].move;
+  }
+  return pool[pool.length - 1].move;
+}
 
 type AiWorkerMessage = {
   id: number;
@@ -168,23 +207,38 @@ async function analyzeMove(
   }
 }
 
+export interface LevelAnalysisOptions extends Omit<AiOptions, "difficulty"> {
+  /** 不做随机降智，直接取引擎最佳着（用于「提示」）。 */
+  deterministic?: boolean;
+  /** 强制使用内置引擎（它会自行排除长将/长捉禁着）。 */
+  forceBuiltin?: boolean;
+}
+
 export async function analyzeAtLevel(
   board: Board,
   level: AiLevel,
-  options: Omit<AiOptions, "difficulty">,
+  options: LevelAnalysisOptions,
   pikafishTimeMs: number,
   onPikafishReady?: () => void,
   onProgress?: (progress: AiSearchProgress) => void,
   signal?: AbortSignal,
 ) {
-  if (level !== "master" && level !== "grandmaster") {
-    return analyzeMove(board, { ...options, difficulty: level }, onProgress, signal);
-  }
+  const plan = LEVEL_PLAN[level];
+  const { deterministic, forceBuiltin, ...searchOptions } = options;
+  const builtin = () => analyzeMove(
+    board,
+    { ...searchOptions, difficulty: plan.fallback, timeMs: Math.min(searchOptions.timeMs ?? 800, plan.fallback === "hard" ? 800 : 400) },
+    onProgress,
+    signal,
+  );
+  if (forceBuiltin) return builtin();
   try {
-    return await pikafishBestMove(
+    const result = await pikafishAnalyze(
       board,
-      options.side ?? "black",
-      pikafishTimeMs,
+      searchOptions.side ?? "black",
+      plan.depth
+        ? { depth: plan.depth, multipv: deterministic ? 1 : plan.multipv }
+        : { movetime: pikafishTimeMs, multipv: 1 },
       onPikafishReady,
       (progress) => onProgress?.({
         depth: progress.depth ?? 0,
@@ -192,17 +246,14 @@ export async function analyzeAtLevel(
         elapsedMs: progress.time ?? 0,
       }),
       signal,
-      options.history,
+      searchOptions.history,
     );
+    if (deterministic || !plan.depth) return result.best;
+    return pickCandidate(result.candidates, plan) ?? result.best;
   } catch (error) {
     if (isAbortError(error)) throw error;
-    console.warn("Pikafish 引擎不可用，已切换为困难兼容模式。", error);
-    return analyzeMove(
-      board,
-      { ...options, difficulty: "hard", timeMs: Math.min(options.timeMs ?? 800, 800) },
-      onProgress,
-      signal,
-    );
+    console.warn("Pikafish 引擎不可用，已切换为内置引擎。", error);
+    return builtin();
   }
 }
 
