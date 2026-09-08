@@ -28,6 +28,8 @@ export interface GameState {
   turn: Side;
   history: AdjudicationMove[];
   result: AdjudicationResult | null;
+  /** 起始局面的 key，用于重复局面计数；缺省为标准开局。自定义开局时必须传。 */
+  initialKey?: string;
 }
 
 export type MoveRejection =
@@ -82,8 +84,9 @@ export function moveNotation(piece: Piece, from: Coord, to: Coord) {
   return `${name}${origin}${action}${destination}`;
 }
 
-export function initialState(): GameState {
-  return { board: initialBoard(), turn: "red", history: [], result: null };
+/** 起始状态；传入棋盘与先行方即可从自定义局面开始。 */
+export function initialState(board: Board = initialBoard(), turn: Side = "red"): GameState {
+  return { board: cloneBoard(board), turn, history: [], result: null, initialKey: positionKey(board, turn) };
 }
 
 export function sideLabel(side: Side) {
@@ -120,10 +123,11 @@ export function playMove(state: GameState, from: Coord, to: Coord): MoveOutcome 
     chaseCandidates: chaseCandidates(next, to, gaveCheck),
   };
 
-  if (gaveCheck && isPerpetualCheckMove(INITIAL_KEY, state.history, record)) {
+  const initialKey = state.initialKey ?? INITIAL_KEY;
+  if (gaveCheck && isPerpetualCheckMove(initialKey, state.history, record)) {
     return { ok: false, reason: "perpetual-check" };
   }
-  if (!gaveCheck && isPerpetualChaseMove(INITIAL_KEY, state.history, record)) {
+  if (!gaveCheck && isPerpetualChaseMove(initialKey, state.history, record)) {
     return { ok: false, reason: "perpetual-chase" };
   }
 
@@ -135,13 +139,13 @@ export function playMove(state: GameState, from: Coord, to: Coord): MoveOutcome 
     result = { winner: state.turn, message: gaveCheck ? "将死，对局结束" : "困毙，对局结束" };
   } else {
     result = materialDrawAdjudication(next)
-      ?? repetitionAdjudication(INITIAL_KEY, history)
+      ?? repetitionAdjudication(initialKey, history)
       ?? naturalMoveAdjudication(history);
   }
 
   return {
     ok: true,
-    state: { board: next, turn: nextTurn, history, result },
+    state: { board: next, turn: nextTurn, history, result, initialKey: state.initialKey },
     record,
     notation: moveNotation(piece, from, to),
     gaveCheck,

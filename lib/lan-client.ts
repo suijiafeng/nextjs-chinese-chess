@@ -24,6 +24,9 @@ export interface LanHandlers {
 
 /** 用 sessionStorage：刷新能恢复座位，而同一浏览器的多个标签页互不干扰。 */
 const SESSION_KEY = "changan-xiangqi-lan-v1";
+/** 创建/加入房间时连不上服务，重试这么多次后放弃（约 3.5 秒）。已有座位凭证（入座过或恢复座位）则一直重连。 */
+export const INITIAL_RETRY_LIMIT = 3;
+export const UNREACHABLE_MESSAGE = "连不上局域网服务，请确认服务已启动、地址正确";
 
 export function loadLanSession(): LanSession | null {
   try {
@@ -85,6 +88,8 @@ export class LanClient {
   private socket: WebSocket | null = null;
   private session: LanSession | null = null;
   private intent: ClientMessage | null = null;
+  /** 本次连接是否已经收到过 seated；决定断线后是无限重连还是有限重试。 */
+  private seated = false;
   private retry = 0;
   private closed = false;
   private timer: number | undefined;
@@ -135,7 +140,7 @@ export class LanClient {
   leave() {
     this.closed = true;
     window.clearTimeout(this.timer);
-    this.send({ type: "leave" });
+    if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: "leave" }));
     this.socket?.close();
     this.socket = null;
     this.session = null;
@@ -152,6 +157,7 @@ export class LanClient {
   private open(host: string, intent: ClientMessage) {
     this.closed = false;
     this.intent = intent;
+    this.seated = false;
     this.retry = 0;
     this.connect(host);
   }
@@ -181,6 +187,7 @@ export class LanClient {
       if (message.type === "seated") {
         const token = this.intent && "token" in this.intent ? this.intent.token : this.session?.token ?? "";
         this.session = { host, code: message.code, token, side: message.side };
+        this.seated = true;
         // 之后重连一律按恢复座位处理。
         this.intent = { type: "join", token, code: message.code };
         saveLanSession(this.session);
@@ -193,8 +200,13 @@ export class LanClient {
         this.handlers.onState(message.snapshot, message.side);
       } else {
         this.handlers.onError(message.message);
-        // 创建/加入失败不再重试，避免反复弹错。
-        if (!this.session) this.closed = true;
+        // 创建/加入/恢复被拒绝：不再重试，也不再保留意图，避免反复弹错或日后凭空建房。
+        if (!this.seated) {
+          this.closed = true;
+          this.intent = null;
+          this.session = null;
+          clearLanSession();
+        }
       }
     };
     socket.onclose = (event) => {
@@ -202,14 +214,20 @@ export class LanClient {
       this.socket = null;
       this.handlers.onConnection(false);
       if (this.closed || event.code === 4000) return;
+      if (!this.session && this.retry >= INITIAL_RETRY_LIMIT) {
+        // 还没有座位凭证就一直连不上：放弃，不再带着创建/加入意图在后台重连，
+        // 否则服务稍后启动时会凭空建房、页面突然跳到等待状态。
+        // 恢复座位（有凭证）不设上限：服务重启期间刷新的页面要能在服务回来后自动回座。
+        this.closed = true;
+        this.intent = null;
+        this.handlers.onError(UNREACHABLE_MESSAGE);
+        return;
+      }
       const delay = Math.min(8000, 500 * 2 ** this.retry++);
       this.timer = window.setTimeout(() => this.connect(host), delay);
     };
-    socket.onerror = () => {
-      if (!this.session && this.retry === 0) {
-        this.handlers.onError("连不上局域网服务，请确认服务已启动、地址正确");
-      }
-    };
+    // 连接失败的后续（重试或放弃）统一在 onclose 里处理。
+    socket.onerror = () => {};
   }
 
   private send(message: ClientMessage) {

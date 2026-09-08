@@ -1,7 +1,8 @@
 "use client";
 
-import { cloneBoard, findKing, inCheck, initialBoard, legalMoves, NAMES } from "@/lib/chess";
-import type { AdjudicationMove, Board, ChaseCandidate, Side } from "@/lib/chess";
+import { cloneBoard, findKing, inCheck, initialBoard, legalMoves, NAMES, positionKey } from "@/lib/chess";
+import type { AdjudicationMove, Board, ChaseCandidate, Piece, Side } from "@/lib/chess";
+import { countPieces, emptySetup, isStandardSetup, PIECE_LIMIT, placementError, SETUP_ORDER, setupError } from "@/lib/setup";
 import { isBannedMove, moveNotation, playMove, REJECTION_MESSAGE, replayMoves } from "@/lib/game-core";
 import { defaultLanHost, hasFixedServer, LanClient, loadLanSession } from "@/lib/lan-client";
 import type { LanSession } from "@/lib/lan-client";
@@ -76,7 +77,13 @@ interface SaveData {
   flipped: boolean;
   soundOn: boolean;
   result: GameResult | null;
+  /** 自定义开局（摆棋）；缺省为标准开局。 */
+  startBoard?: Board;
+  startTurn?: Side;
 }
+
+const NO_TARGETS: Coord[] = [];
+const STANDARD_KEY = positionKey(initialBoard(), "red");
 
 function formatTime(total: number) {
   const minutes = Math.floor(total / 60).toString().padStart(2, "0");
@@ -118,6 +125,34 @@ export default function Home() {
   const [boardFullscreen, setBoardFullscreen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [lan, setLan] = useState<LanState>(LAN_IDLE);
+  /** 本局的起始局面：标准开局或摆棋结果。重开回到标准开局。 */
+  const [startBoard, setStartBoard] = useState<Board>(() => initialBoard());
+  const [startTurn, setStartTurn] = useState<Side>("red");
+  const startRef = useRef<{ board: Board; turn: Side }>({ board: initialBoard(), turn: "red" });
+  /** 摆棋编辑态。 */
+  const [editing, setEditing] = useState(false);
+  const [editBoard, setEditBoard] = useState<Board>(() => initialBoard());
+  const [editTurn, setEditTurn] = useState<Side>("red");
+  const [brush, setBrush] = useState<Piece | "erase" | null>(null);
+  const [editPick, setEditPick] = useState<Coord | null>(null);
+  const [editNotice, setEditNotice] = useState<string | null>(null);
+  /** 开局卡片上「开始对局」旁的下拉菜单。 */
+  const [readyMenuOpen, setReadyMenuOpen] = useState(false);
+  const readyMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!readyMenuOpen) return;
+    const close = (event: PointerEvent) => {
+      if (!readyMenuRef.current?.contains(event.target as Node)) setReadyMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setReadyMenuOpen(false); };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [readyMenuOpen]);
   const [lanHost, setLanHost] = useState("localhost");
   const [joinCode, setJoinCode] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
@@ -225,6 +260,11 @@ export default function Home() {
             setPlayerSide(data.playerSide === "black" ? "black" : "red");
             setFlipped(!!data.flipped);
             setSoundOn(data.soundOn !== false);
+            if (Array.isArray(data.startBoard) && data.startBoard.length === 10) {
+              const savedTurn: Side = data.startTurn === "black" ? "black" : "red";
+              setStartBoard(data.startBoard);
+              setStartTurn(savedTurn);
+            }
             if (data.result) {
               setResult(data.result);
               setResultDismissed(true);
@@ -242,6 +282,13 @@ export default function Home() {
   useEffect(() => {
     historyRef.current = history;
   }, [history]);
+
+  useEffect(() => {
+    startRef.current = { board: startBoard, turn: startTurn };
+  }, [startBoard, startTurn]);
+  // 联网对弈由服务端从标准开局裁定，本地计数必须与之一致，不受存档里的自定义开局影响。
+  const startKey = useMemo(() => mode === "online" ? STANDARD_KEY : positionKey(startBoard, startTurn), [mode, startBoard, startTurn]);
+  const customStart = useMemo(() => !isStandardSetup(startBoard, startTurn), [startBoard, startTurn]);
 
   /** 把服务端快照同步到本地棋局；对手新落的一手走动画，其余情况（悔棋、重连、重开）静默重建。 */
   const applySnapshot = useCallback((snap: RoomSnapshot, side: Side) => {
@@ -391,13 +438,15 @@ export default function Home() {
       flipped,
       soundOn,
       result,
+      startBoard,
+      startTurn,
     };
     try {
       window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     } catch {
       // 存储不可用时忽略。
     }
-  }, [aiDifficulty, board, flipped, history, mode, playerSide, restored, result, soundOn, times, turn]);
+  }, [aiDifficulty, board, flipped, history, mode, playerSide, restored, result, soundOn, startBoard, startTurn, times, turn]);
 
   const aiSide: Side = playerSide === "red" ? "black" : "red";
   const reviewing = reviewPly !== null;
@@ -451,8 +500,15 @@ export default function Home() {
     setMode(nextMode);
     setPlayerSide(nextSide);
     setFlipped(nextMode === "ai" && nextSide === "black");
+    // 重开一律回到标准开局；摆出来的局面只用于当前这一局。
+    if (customStart) {
+      setStartBoard(initialBoard());
+      setStartTurn("red");
+    }
     setBoard(initialBoard());
     setTurn("red");
+    setEditing(false);
+    setReadyMenuOpen(false);
     setSelected(null);
     setTargets([]);
     setHistory([]);
@@ -470,7 +526,7 @@ export default function Home() {
     setStarted(false);
     if (nextMode !== "online" && lanRef.current?.current) lanRef.current.leave();
     if (nextMode !== "online") setLan(LAN_IDLE);
-  }, [mode, playerSide]);
+  }, [customStart, mode, playerSide]);
 
   const lanCreate = (side: Side) => {
     setLan({ ...LAN_IDLE, status: "joining", side });
@@ -532,6 +588,7 @@ export default function Home() {
 
   const beginGame = () => {
     if (started) return;
+    setReadyMenuOpen(false);
     setStarted(true);
     playSound("start", { side: null });
   };
@@ -559,7 +616,7 @@ export default function Home() {
   const shake = useCallback((coord: Coord) => setShaking([coord[0], coord[1]]), []);
 
   const commitMove = useCallback((from: Coord, to: Coord, actor: "human" | "ai" | "remote" = "human") => {
-    const outcome = playMove({ board, turn, history, result: null }, from, to);
+    const outcome = playMove({ board, turn, history, result: null, initialKey: startKey }, from, to);
     if (!outcome.ok) {
       if (outcome.reason === "perpetual-check" || outcome.reason === "perpetual-chase") {
         playSound("illegal", { side: turn });
@@ -604,7 +661,7 @@ export default function Home() {
       else playSound(captured ? "capture" : "move", detail);
     }
     return true;
-  }, [board, history, playSound, shake, turn]);
+  }, [board, history, playSound, shake, startKey, turn]);
 
   useEffect(() => {
     commitMoveRef.current = commitMove;
@@ -672,15 +729,17 @@ export default function Home() {
           history,
           side: aiSide,
           timeMs: searchBudget,
+          start: startRef.current,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (cancelled) return;
         let chosen = move;
-        if (chosen && isBannedMove({ board, turn: aiSide, history, result: null }, [chosen[0], chosen[1]], [chosen[2], chosen[3]])) {
+        if (chosen && isBannedMove({ board, turn: aiSide, history, result: null, initialKey: startKey }, [chosen[0], chosen[1]], [chosen[2], chosen[3]])) {
           // Pikafish 选了长将/长捉着法：改用内置引擎，它会自行排除禁着。
           chosen = await analyzeAtLevel(board, "hard", {
             history,
             side: aiSide,
             timeMs: 800,
+            start: startRef.current,
             forceBuiltin: true,
           }, 800, undefined, undefined, controller.signal);
           if (cancelled) return;
@@ -702,7 +761,132 @@ export default function Home() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [aiDifficulty, aiSide, board, commitMove, engineError, history, mode, playerSide, result, reviewing, started, turn]);
+  }, [aiDifficulty, aiSide, board, commitMove, engineError, history, mode, playerSide, result, reviewing, startKey, started, turn]);
+
+  /* ---------- 摆棋（自定义开局） ---------- */
+
+  const openEditor = () => {
+    setEditBoard(cloneBoard(startBoard));
+    setEditTurn(startTurn);
+    setBrush(null);
+    setEditPick(null);
+    setEditNotice(null);
+    setSelected(null);
+    setTargets([]);
+    setHint(null);
+    setEditing(true);
+  };
+
+  const rejectEdit = (message: string, coord: Coord) => {
+    setEditNotice(message);
+    shake(coord);
+    playSound("illegal", { side: null });
+  };
+
+  const updateEditBoard = (mutate: (next: Board) => void) => {
+    const next = cloneBoard(editBoard);
+    mutate(next);
+    setEditBoard(next);
+    setEditNotice(null);
+  };
+
+  /** 点击棋盘：有画笔则放置/移除，否则拾起并移动棋子。 */
+  const editChoose = (r: number, c: number) => {
+    const target: Coord = [r, c];
+    const occupant = editBoard[r][c];
+    if (brush === "erase") {
+      if (occupant) updateEditBoard((next) => { next[r][c] = null; });
+      return;
+    }
+    if (brush) {
+      if (occupant && occupant.side === brush.side && occupant.t === brush.t) {
+        updateEditBoard((next) => { next[r][c] = null; });
+        return;
+      }
+      const error = placementError(editBoard, brush, target);
+      if (error) {
+        rejectEdit(error, target);
+        return;
+      }
+      updateEditBoard((next) => { next[r][c] = { ...brush }; });
+      return;
+    }
+    if (editPick) {
+      const [pr, pc] = editPick;
+      if (pr === r && pc === c) {
+        setEditPick(null);
+        return;
+      }
+      const moving = editBoard[pr][pc];
+      if (moving) {
+        const error = placementError(editBoard, moving, target, editPick);
+        if (error) {
+          rejectEdit(error, target);
+          return;
+        }
+        updateEditBoard((next) => {
+          next[r][c] = { ...moving };
+          next[pr][pc] = null;
+        });
+      }
+      setEditPick(null);
+      return;
+    }
+    if (occupant) {
+      setEditPick(target);
+      setEditNotice(null);
+    }
+  };
+
+  const chooseBrush = (next: Piece | "erase") => {
+    setEditPick(null);
+    setEditNotice(null);
+    setBrush((current) => {
+      const same = current === next
+        || (current !== null && current !== "erase" && next !== "erase" && current.side === next.side && current.t === next.t);
+      return same ? null : next;
+    });
+  };
+
+  const resetEditor = (board: Board, turn: Side = editTurn) => {
+    setEditBoard(board);
+    setEditTurn(turn);
+    setBrush(null);
+    setEditPick(null);
+    setEditNotice(null);
+  };
+
+  /** 把某个局面设为本局起点并重置棋盘（未开始对局时调用）。 */
+  const applyStart = (nextBoard: Board, nextTurn: Side) => {
+    setStartBoard(nextBoard);
+    setStartTurn(nextTurn);
+    setBoard(cloneBoard(nextBoard));
+    setTurn(nextTurn);
+    setHistory([]);
+    setResult(null);
+    setResultDismissed(false);
+    setRuleNotice(null);
+    setEngineError(null);
+    setHint(null);
+    setSelected(null);
+    setTargets([]);
+    setReviewPly(null);
+    setTimes({ red: 900, black: 900 });
+    movingQueueRef.current = [];
+    setMoving(null);
+    setLanding(null);
+    setEditing(false);
+  };
+
+  const finishEditing = () => {
+    const error = setupError(editBoard, editTurn);
+    if (error) {
+      setEditNotice(error);
+      playSound("illegal", { side: null });
+      return;
+    }
+    applyStart(cloneBoard(editBoard), editTurn);
+  };
 
   const choosePoint = useCallback((r: number, c: number) => {
     if (!started || result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
@@ -825,15 +1009,17 @@ export default function Home() {
           history,
           side: turn,
           timeMs: searchBudget,
+          start: startRef.current,
           deterministic: true,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
-        if (isBannedMove({ board, turn, history, result: null }, [move[0], move[1]], [move[2], move[3]])) {
+        if (isBannedMove({ board, turn, history, result: null, initialKey: startKey }, [move[0], move[1]], [move[2], move[3]])) {
           const safe = await analyzeAtLevel(board, "hard", {
             history,
             side: turn,
             timeMs: 800,
+            start: startRef.current,
             forceBuiltin: true,
           }, 800, undefined, undefined, controller.signal);
           if (hintRequestRef.current !== requestId || !safe) return;
@@ -921,6 +1107,47 @@ export default function Home() {
     );
   };
 
+  const renderPalette = (side: Side, top = false) => {
+    const isRed = side === "red";
+    return (
+      <div className={`edit-palette${top ? " edit-palette-top" : ""}`} role="toolbar" aria-label={`${isRed ? "红方" : "黑方"}棋子`}>
+        <span className={`player-mark ${isRed ? "red-mark" : "black-mark"}`}>{isRed ? "帥" : "将"}</span>
+        {SETUP_ORDER.map((t) => {
+          const used = countPieces(editBoard, side, t);
+          const active = brush !== null && brush !== "erase" && brush.side === side && brush.t === t;
+          return (
+            <button
+              key={t}
+              type="button"
+              className={`edit-piece ${isRed ? "edit-red" : "edit-black"}${active ? " active" : ""}`}
+              disabled={used >= PIECE_LIMIT[t] && !active}
+              aria-pressed={active}
+              title={`${NAMES[side][t]} ${used}/${PIECE_LIMIT[t]}`}
+              onClick={() => chooseBrush({ side, t })}
+            >
+              <i>{NAMES[side][t]}</i><small>{used}/{PIECE_LIMIT[t]}</small>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderEditToolbar = () => (
+    <div className="edit-toolbar">
+      <div className="seg seg-2 edit-turn" role="group" aria-label="先行方">
+        <button type="button" className={`red-seg${editTurn === "red" ? " active" : ""}`} aria-pressed={editTurn === "red"} onClick={() => { setEditTurn("red"); setEditNotice(null); }}><i>帥</i>红先行</button>
+        <button type="button" className={`black-seg${editTurn === "black" ? " active" : ""}`} aria-pressed={editTurn === "black"} onClick={() => { setEditTurn("black"); setEditNotice(null); }}><i>将</i>黑先行</button>
+      </div>
+      <button type="button" className={`edit-tool${brush === "erase" ? " active" : ""}`} aria-pressed={brush === "erase"} onClick={() => chooseBrush("erase")}>✕ 移除</button>
+      <button type="button" className="edit-tool" onClick={() => resetEditor(emptySetup())}>清空</button>
+      <button type="button" className="edit-tool" onClick={() => resetEditor(initialBoard(), "red")}>标准开局</button>
+      <span className="edit-spacer" />
+      <button type="button" className="edit-tool" onClick={() => setEditing(false)}>取消</button>
+      <button type="button" className="edit-done" onClick={finishEditing}>完成</button>
+    </div>
+  );
+
   const renderControls = (extraClass = "") => (
     <div className={`control-row${extraClass ? ` ${extraClass}` : ""}`}>
             <button type="button" onClick={requestHint} disabled={mode === "online" || !started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
@@ -939,7 +1166,17 @@ export default function Home() {
   );
 
   const lanWaiting = mode === "online" && lan.status !== "playing" && !(started && lan.code);
-  const statusTitle = mode === "online" && lan.pendingUndo
+  const editHint = editNotice
+    ?? (brush === "erase"
+      ? "点击棋盘上的棋子将其移除"
+      : brush
+        ? `点击棋盘放置${NAMES[brush.side][brush.t]}，再点同样的棋子可移除`
+        : editPick
+          ? "点击目标位置放下棋子"
+          : "点击棋子盘里的棋子后在棋盘上放置；点击棋盘上的棋子可拾起移动");
+  const statusTitle = editing
+    ? "编辑开局"
+    : mode === "online" && lan.pendingUndo
     ? lan.pendingUndo === lan.side ? "等待对方同意悔棋" : "对方请求悔棋"
     : lanWaiting
     ? lan.status === "idle" ? (hasFixedServer() ? "联网对弈" : "局域网对弈") : lan.status === "joining" ? "正在连接" : "等待对手"
@@ -961,7 +1198,9 @@ export default function Home() {
         ? `${turn === "red" ? "红方" : "黑方"}被将军`
         : `${turn === "red" ? "红方" : "黑方"}行棋`;
   const statusLoading = !engineError && !reviewing && !result && (aiThinking || hintThinking);
-  const statusNote = mode === "online" && lan.pendingUndo && !ruleNotice
+  const statusNote = editing
+    ? editHint
+    : mode === "online" && lan.pendingUndo && !ruleNotice
     ? lan.pendingUndo === lan.side ? "对方同意后将撤回你的最后一手" : "同意后将撤回对方的最后一手"
     : lanWaiting && !ruleNotice
     ? lan.status === "idle" ? "创建房间或输入房间码加入" : lan.status === "joining" ? (hasFixedServer() ? "正在连接服务器…" : "正在连接局域网服务…") : `房间码 ${lan.code}，等待对方加入`
@@ -1018,25 +1257,25 @@ export default function Home() {
 
       <section ref={gameLayoutRef} className="game-layout" id="game">
         <div className="board-column" style={restored ? undefined : { visibility: "hidden" }} aria-busy={!restored}>
-          {renderPlayer(topSide, true)}
+          {editing ? renderPalette(topSide, true) : renderPlayer(topSide, true)}
 
           <div ref={boardStageRef} className="board-stage">
           <ChessBoard
-            board={visibleBoard}
-            turn={visibleTurn}
+            board={editing ? editBoard : visibleBoard}
+            turn={editing ? editTurn : visibleTurn}
             flipped={flipped}
-            reviewing={reviewing}
+            reviewing={reviewing && !editing}
             visiblePly={visiblePly}
-            checked={checked}
-            selected={selected}
-            targets={targets}
-            lastMove={visibleLastMove}
-            hint={hint}
-            moving={moving}
-            landing={landing}
+            checked={!editing && checked}
+            selected={editing ? editPick : selected}
+            targets={editing ? NO_TARGETS : targets}
+            lastMove={editing ? null : visibleLastMove}
+            hint={editing ? null : hint}
+            moving={editing ? null : moving}
+            landing={editing ? null : landing}
             shaking={shaking}
             onMoveDone={handleMoveDone}
-            onChoose={choosePoint}
+            onChoose={editing ? editChoose : choosePoint}
           />
           {mode === "online" && lan.status !== "playing" && !(started && lan.code) ? (
             <div className="ready-overlay">
@@ -1088,26 +1327,46 @@ export default function Home() {
                 )}
               </div>
             </div>
-          ) : !started && !result && !reviewing && mode !== "online" ? (
+          ) : !started && !result && !reviewing && !editing && mode !== "online" ? (
             <div className="ready-overlay">
               <div className="ready-card">
                 <span className="ready-seal" aria-hidden="true">棋</span>
                 <small>
                   {mode === "ai"
-                    ? `人机对弈 · 你执${playerSide === "red" ? "红先行" : "黑后行"} · ${AI_LEVEL_LABEL[aiDifficulty]}`
-                    : "同屏对弈 · 红方先行"}
+                    ? `人机对弈 · 你执${playerSide === "red" ? "红" : "黑"} · ${AI_LEVEL_LABEL[aiDifficulty]}`
+                    : "同屏对弈"}
+                  {customStart ? ` · 自定义开局 · ${startTurn === "red" ? "红" : "黑"}方先行` : mode === "ai" ? ` · ${playerSide === "red" ? "先行" : "后行"}` : " · 红方先行"}
                 </small>
-                <button type="button" className="ready-button" onClick={beginGame} autoFocus>
-                  开始对局
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
-                </button>
+                <div className="ready-split" ref={readyMenuRef}>
+                  <button type="button" className="ready-button" onClick={beginGame} autoFocus>
+                    开始对局
+                  </button>
+                  <button
+                    type="button"
+                    className={`ready-button ready-caret${readyMenuOpen ? " is-open" : ""}`}
+                    aria-haspopup="menu"
+                    aria-expanded={readyMenuOpen}
+                    aria-label="更多开局选项"
+                    onClick={() => setReadyMenuOpen((open) => !open)}
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
+                  </button>
+                  {readyMenuOpen ? (
+                    <div className="ready-menu" role="menu">
+                      <button type="button" role="menuitem" onClick={() => { setReadyMenuOpen(false); openEditor(); }}>编辑开局</button>
+                      {customStart ? (
+                        <button type="button" role="menuitem" onClick={() => { setReadyMenuOpen(false); applyStart(initialBoard(), "red"); }}>恢复标准开局</button>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </div>
           ) : null}
           </div>
 
-          {renderPlayer(bottomSide)}
-          {renderControls("controls-mobile")}
+          {editing ? renderPalette(bottomSide) : renderPlayer(bottomSide)}
+          {editing ? renderEditToolbar() : renderControls("controls-mobile")}
           <button
             type="button"
             className="drawer-toggle"
@@ -1194,8 +1453,8 @@ export default function Home() {
             </div>
           ) : null}
 
-          <div className={`board-status${result ? " game-over" : ""}${ruleNotice ? " rule-limited" : ""}`} role="status" aria-live="polite">
-            <span className={`mini-piece ${turn === "black" ? "black-mini" : ""}`}>{turn === "red" ? "帥" : "将"}</span>
+          <div className={`board-status${result ? " game-over" : ""}${ruleNotice || (editing && editNotice) ? " rule-limited" : ""}`} role="status" aria-live="polite">
+            <span className={`mini-piece ${(editing ? editTurn : turn) === "black" ? "black-mini" : ""}`}>{(editing ? editTurn : turn) === "red" ? "帥" : "将"}</span>
             <b>{statusTitle}{statusLoading ? <span className="status-loading" aria-hidden="true"><i /><i /><i /></span> : null}</b>
             <small>{statusNote}</small>
           </div>

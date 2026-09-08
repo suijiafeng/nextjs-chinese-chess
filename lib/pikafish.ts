@@ -198,6 +198,7 @@ export async function pikafishAnalyze(
   onProgress?: (progress: PikafishProgress) => void,
   signal?: AbortSignal,
   history?: AdjudicationMove[],
+  start?: { board: Board; turn: Side },
 ): Promise<PikafishResult> {
   if (signal?.aborted) throw new DOMException("Pikafish 引擎分析已取消", "AbortError");
   const handleLoadingAbort = () => disposeEngine(new DOMException("Pikafish 引擎分析已取消", "AbortError"));
@@ -227,8 +228,8 @@ export async function pikafishAnalyze(
       engineWorker!.postMessage({
         type: "SEARCH",
         // UCI applies moves after the supplied FEN; the full game history
-        // must start from the initial position, not the already-played board.
-        fen: history?.length ? boardToFen(initialBoard(), "red") : boardToFen(board, side),
+        // must start from the starting position (standard or custom), not the already-played board.
+        fen: history?.length ? boardToFen(start?.board ?? initialBoard(), start?.turn ?? "red") : boardToFen(board, side),
         movetime,
         depth: options.depth,
         multipv: options.multipv ?? 1,
@@ -278,7 +279,8 @@ export async function pikafishBestMove(
   onProgress?: (progress: PikafishProgress) => void,
   signal?: AbortSignal,
   history?: AdjudicationMove[],
+  start?: { board: Board; turn: Side },
 ): Promise<EngineMove | null> {
-  const result = await pikafishAnalyze(board, side, { movetime: moveTimeMs }, onReady, onProgress, signal, history);
+  const result = await pikafishAnalyze(board, side, { movetime: moveTimeMs }, onReady, onProgress, signal, history, start);
   return result.best;
 }
