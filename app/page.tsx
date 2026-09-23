@@ -363,7 +363,7 @@ export default function Home() {
         const move = await analyzeAtLevel(board, aiDifficulty, {
           history,
           side: "black",
-          timeMs: aiDifficulty === "master" ? searchBudget : undefined,
+          timeMs: searchBudget,
         }, searchBudget, () => setGrandmasterReady(true), undefined, controller.signal);
         if (cancelled) return;
         if (move) commitMove([move[0], move[1]], [move[2], move[3]], "ai");
@@ -475,8 +475,8 @@ export default function Home() {
         const move = await analyzeAtLevel(board, aiDifficulty, {
           history,
           side: turn,
-          timeMs: aiDifficulty === "master" ? 900 : undefined,
-        }, 1400, () => setGrandmasterReady(true), undefined, controller.signal);
+          timeMs: aiDifficulty === "master" ? 2000 : undefined,
+        }, 3000, () => setGrandmasterReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
         const from: Coord = [move[0], move[1]];
