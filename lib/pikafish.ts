@@ -104,7 +104,7 @@ function disposeEngine(error: Error) {
 }
 
 export function disposePikafish() {
-  disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
+  disposeEngine(new DOMException("Pikafish 引擎分析已取消", "AbortError"));
 }
 
 function ensureEngine() {
@@ -118,7 +118,7 @@ function ensureEngine() {
   try {
     engineWorker = new Worker("/js/worker/pikafish-engine.js");
     engineLoadingTimeout = window.setTimeout(() => {
-      disposeEngine(new Error("宗师引擎加载超时"));
+      disposeEngine(new Error("Pikafish 引擎加载超时"));
     }, 120_000);
 
     engineWorker.onmessage = (event: MessageEvent<EngineMessage>) => {
@@ -142,15 +142,15 @@ function ensureEngine() {
         return;
       }
       if (data.type === "ERROR") {
-        disposeEngine(new Error(data.message || "宗师引擎运行失败"));
+        disposeEngine(new Error(data.message || "Pikafish 引擎运行失败"));
       }
     };
     engineWorker.onerror = (event) => {
-      disposeEngine(new Error(event.message || "宗师引擎启动失败"));
+      disposeEngine(new Error(event.message || "Pikafish 引擎启动失败"));
     };
     engineWorker.postMessage({ type: "INIT" });
   } catch (error) {
-    disposeEngine(error instanceof Error ? error : new Error("宗师引擎启动失败"));
+    disposeEngine(error instanceof Error ? error : new Error("Pikafish 引擎启动失败"));
   }
 
   return engineReady;
@@ -165,8 +165,8 @@ export async function pikafishBestMove(
   signal?: AbortSignal,
   history?: AdjudicationMove[],
 ): Promise<EngineMove | null> {
-  if (signal?.aborted) throw new DOMException("宗师引擎分析已取消", "AbortError");
-  const handleLoadingAbort = () => disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
+  if (signal?.aborted) throw new DOMException("Pikafish 引擎分析已取消", "AbortError");
+  const handleLoadingAbort = () => disposeEngine(new DOMException("Pikafish 引擎分析已取消", "AbortError"));
   signal?.addEventListener("abort", handleLoadingAbort, { once: true });
   try {
     await ensureEngine();
@@ -174,13 +174,13 @@ export async function pikafishBestMove(
     signal?.removeEventListener("abort", handleLoadingAbort);
   }
   onReady?.();
-  if (!engineWorker) throw new Error("宗师引擎尚未就绪");
-  if (activeSearch) throw new Error("宗师引擎正在分析另一局面");
+  if (!engineWorker) throw new Error("Pikafish 引擎尚未就绪");
+  if (activeSearch) throw new Error("Pikafish 引擎正在分析另一局面");
 
   const moveText = await new Promise<string | null>((resolve, reject) => {
-    const handleAbort = () => disposeEngine(new DOMException("宗师引擎分析已取消", "AbortError"));
+    const handleAbort = () => disposeEngine(new DOMException("Pikafish 引擎分析已取消", "AbortError"));
     const timeout = window.setTimeout(() => {
-      disposeEngine(new Error("宗师引擎计算超时"));
+      disposeEngine(new Error("Pikafish 引擎计算超时"));
     }, moveTimeMs + 5000);
     activeSearch = { resolve, reject, timeout, onProgress, signal, handleAbort };
     signal?.addEventListener("abort", handleAbort, { once: true });
@@ -194,16 +194,16 @@ export async function pikafishBestMove(
         moves: history ? historyToUci(history) : [],
       });
     } catch (error) {
-      disposeEngine(error instanceof Error ? error : new Error("宗师引擎搜索启动失败"));
+      disposeEngine(error instanceof Error ? error : new Error("Pikafish 引擎搜索启动失败"));
     }
   });
 
   if (!moveText) return null;
   const move = parseMove(moveText);
-  if (!move) throw new Error("宗师引擎返回了无效着法");
+  if (!move) throw new Error("Pikafish 引擎返回了无效着法");
   const [fr, fc, tr, tc] = move;
   const piece = board[fr]?.[fc];
   const legal = piece?.side === side && legalMoves(board, fr, fc).some(([r, c]) => r === tr && c === tc);
-  if (!legal) throw new Error("宗师引擎着法未通过规则校验");
+  if (!legal) throw new Error("Pikafish 引擎着法未通过规则校验");
   return move;
 }
