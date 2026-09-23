@@ -67,6 +67,7 @@ function ChessBoardView({
     () => new Set(targets.map(([row, col]) => row * 9 + col)),
     [targets],
   );
+  const topSide: Side = flipped ? "red" : "black";
 
   const gridRef = useRef<HTMLDivElement>(null);
   const ghostRef = useRef<HTMLSpanElement>(null);
@@ -136,6 +137,7 @@ function ChessBoardView({
             const classes = [
               "point",
               piece ? `piece ${piece.side}` : "",
+              piece?.side === topSide ? "piece-facing-top" : "",
               target ? "target" : "",
               target && piece ? "capture-target" : "",
               selectedPoint ? "selected" : "",
@@ -163,7 +165,9 @@ function ChessBoardView({
                 onClick={() => onChoose(row, col)}
                 onKeyDown={(event) => handleKey(event, row, col)}
               >
-                {piece ? <span>{NAMES[piece.side][piece.t]}</span> : null}
+                {piece ? (
+                  <span><span className="piece-glyph">{NAMES[piece.side][piece.t]}</span></span>
+                ) : null}
               </button>
             );
           })}
@@ -171,20 +175,20 @@ function ChessBoardView({
             <>
               {moving.captured ? (
                 <span
-                  className={`move-ghost captured-ghost ${moving.captured.side}`}
+                  className={`move-ghost captured-ghost ${moving.captured.side}${moving.captured.side === topSide ? " piece-facing-top" : ""}`}
                   style={pointStyle(moving.to, flipped)}
                   aria-hidden="true"
                 >
-                  <span>{NAMES[moving.captured.side][moving.captured.t]}</span>
+                  <span><span className="piece-glyph">{NAMES[moving.captured.side][moving.captured.t]}</span></span>
                 </span>
               ) : null}
               <span
                 ref={ghostRef}
-                className={`move-ghost ${moving.piece.side}`}
+                className={`move-ghost ${moving.piece.side}${moving.piece.side === topSide ? " piece-facing-top" : ""}`}
                 style={pointStyle(moving.to, flipped)}
                 aria-hidden="true"
               >
-                <span>{NAMES[moving.piece.side][moving.piece.t]}</span>
+                <span><span className="piece-glyph">{NAMES[moving.piece.side][moving.piece.t]}</span></span>
               </span>
             </>
           ) : null}

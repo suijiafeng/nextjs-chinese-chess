@@ -1,4 +1,4 @@
-import { legalMoves } from "./chess";
+import { initialBoard, legalMoves } from "./chess";
 import type { AdjudicationMove, Board, PieceType, Side } from "./chess";
 
 type EngineMove = [number, number, number, number];
@@ -187,7 +187,9 @@ export async function pikafishBestMove(
     try {
       engineWorker!.postMessage({
         type: "SEARCH",
-        fen: boardToFen(board, side),
+        // UCI applies moves after the supplied FEN; the full game history
+        // must start from the initial position, not the already-played board.
+        fen: history?.length ? boardToFen(initialBoard(), "red") : boardToFen(board, side),
         movetime: moveTimeMs,
         moves: history ? historyToUci(history) : [],
       });
