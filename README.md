@@ -22,7 +22,7 @@
 
 ## 界面预览
 
-![长安棋社桌面端对局界面](./public/screenshots/game-desktop.png)
+![长安棋社桌面端对局界面](./public/screenshots/Snipaste_2026-09-23_16-30-13.png)
 
 > 桌面端实际对局界面：棋盘、棋力选择、本局状态与着法记录保持在同一视野内。
 
