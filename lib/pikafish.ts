@@ -12,8 +12,31 @@ export interface PikafishProgress {
 type EngineMessage =
   | { type: "READY"; threads?: number }
   | { type: "INFO"; info?: PikafishProgress }
+  | { type: "PV"; depth?: number; multipv?: number; score?: number; mate?: number; pv?: string[] }
   | { type: "BEST_MOVE"; move?: string }
   | { type: "ERROR"; message?: string };
+
+/** 一条候选着法：分数以行棋方视角计，正数对行棋方有利；mate 为正表示行棋方将在 N 步内将死对方。 */
+export interface PikafishCandidate {
+  move: EngineMove;
+  score: number;
+  mate?: number;
+  depth: number;
+}
+
+export interface PikafishSearchOptions {
+  /** 按时间搜索（毫秒）。与 depth 二选一；都没给时默认 5 秒。 */
+  movetime?: number;
+  /** 按固定深度搜索，用于限制棋力。 */
+  depth?: number;
+  /** 同时给出前 N 名着法。 */
+  multipv?: number;
+}
+
+export interface PikafishResult {
+  best: EngineMove | null;
+  candidates: PikafishCandidate[];
+}
 
 const PIECE_FEN: Record<PieceType, string> = {
   K: "k",
@@ -37,6 +60,8 @@ let activeSearch: {
   onProgress?: (progress: PikafishProgress) => void;
   signal?: AbortSignal;
   handleAbort: () => void;
+  /** multipv 序号 → 该序号最新一层的候选 */
+  lines: Map<number, { move: string; score: number; mate?: number; depth: number }>;
 } | null = null;
 
 function boardToFen(board: Board, side: Side) {
@@ -141,6 +166,15 @@ function ensureEngine() {
         activeSearch.onProgress?.(data.info);
         return;
       }
+      if (data.type === "PV" && activeSearch && data.pv?.[0] && typeof data.score === "number") {
+        activeSearch.lines.set(data.multipv ?? 1, {
+          move: data.pv[0],
+          score: data.score,
+          mate: data.mate,
+          depth: data.depth ?? 0,
+        });
+        return;
+      }
       if (data.type === "ERROR") {
         disposeEngine(new Error(data.message || "Pikafish 引擎运行失败"));
       }
@@ -156,15 +190,15 @@ function ensureEngine() {
   return engineReady;
 }
 
-export async function pikafishBestMove(
+export async function pikafishAnalyze(
   board: Board,
   side: Side,
-  moveTimeMs: number,
+  options: PikafishSearchOptions,
   onReady?: () => void,
   onProgress?: (progress: PikafishProgress) => void,
   signal?: AbortSignal,
   history?: AdjudicationMove[],
-): Promise<EngineMove | null> {
+): Promise<PikafishResult> {
   if (signal?.aborted) throw new DOMException("Pikafish 引擎分析已取消", "AbortError");
   const handleLoadingAbort = () => disposeEngine(new DOMException("Pikafish 引擎分析已取消", "AbortError"));
   signal?.addEventListener("abort", handleLoadingAbort, { once: true });
@@ -177,12 +211,17 @@ export async function pikafishBestMove(
   if (!engineWorker) throw new Error("Pikafish 引擎尚未就绪");
   if (activeSearch) throw new Error("Pikafish 引擎正在分析另一局面");
 
+  const movetime = options.depth ? undefined : (options.movetime ?? 5000);
+  // 固定深度搜索没有时间上限，给一个宽松的保护值。
+  const guardMs = movetime !== undefined ? movetime + 5000 : 30_000;
+  const lines = new Map<number, { move: string; score: number; mate?: number; depth: number }>();
+
   const moveText = await new Promise<string | null>((resolve, reject) => {
     const handleAbort = () => disposeEngine(new DOMException("Pikafish 引擎分析已取消", "AbortError"));
     const timeout = window.setTimeout(() => {
       disposeEngine(new Error("Pikafish 引擎计算超时"));
-    }, moveTimeMs + 5000);
-    activeSearch = { resolve, reject, timeout, onProgress, signal, handleAbort };
+    }, guardMs);
+    activeSearch = { resolve, reject, timeout, onProgress, signal, handleAbort, lines };
     signal?.addEventListener("abort", handleAbort, { once: true });
     try {
       engineWorker!.postMessage({
@@ -190,7 +229,9 @@ export async function pikafishBestMove(
         // UCI applies moves after the supplied FEN; the full game history
         // must start from the initial position, not the already-played board.
         fen: history?.length ? boardToFen(initialBoard(), "red") : boardToFen(board, side),
-        movetime: moveTimeMs,
+        movetime,
+        depth: options.depth,
+        multipv: options.multipv ?? 1,
         moves: history ? historyToUci(history) : [],
       });
     } catch (error) {
@@ -198,12 +239,46 @@ export async function pikafishBestMove(
     }
   });
 
-  if (!moveText) return null;
-  const move = parseMove(moveText);
-  if (!move) throw new Error("Pikafish 引擎返回了无效着法");
-  const [fr, fc, tr, tc] = move;
-  const piece = board[fr]?.[fc];
-  const legal = piece?.side === side && legalMoves(board, fr, fc).some(([r, c]) => r === tr && c === tc);
-  if (!legal) throw new Error("Pikafish 引擎着法未通过规则校验");
-  return move;
+  const isLegal = (move: EngineMove) => {
+    const [fr, fc, tr, tc] = move;
+    const piece = board[fr]?.[fc];
+    return piece?.side === side && legalMoves(board, fr, fc).some(([r, c]) => r === tr && c === tc);
+  };
+
+  let best: EngineMove | null = null;
+  if (moveText) {
+    best = parseMove(moveText);
+    if (!best) throw new Error("Pikafish 引擎返回了无效着法");
+    if (!isLegal(best)) throw new Error("Pikafish 引擎着法未通过规则校验");
+  }
+
+  // 只保留最深一层的候选：各条线深度可能不一致（搜索被打断时），统一到最大深度避免分数不可比。
+  const maxDepth = Math.max(0, ...[...lines.values()].map((line) => line.depth));
+  const candidates: PikafishCandidate[] = [];
+  const seen = new Set<string>();
+  for (const line of lines.values()) {
+    if (line.depth < maxDepth - 1 || seen.has(line.move)) continue;
+    const move = parseMove(line.move);
+    if (!move || !isLegal(move)) continue;
+    seen.add(line.move);
+    candidates.push({ move, score: line.score, mate: line.mate, depth: line.depth });
+  }
+  candidates.sort((x, y) => y.score - x.score);
+  if (best && !candidates.some((item) => item.move.join() === best!.join())) {
+    candidates.unshift({ move: best, score: candidates[0]?.score ?? 0, depth: maxDepth });
+  }
+  return { best, candidates };
+}
+
+export async function pikafishBestMove(
+  board: Board,
+  side: Side,
+  moveTimeMs: number,
+  onReady?: () => void,
+  onProgress?: (progress: PikafishProgress) => void,
+  signal?: AbortSignal,
+  history?: AdjudicationMove[],
+): Promise<EngineMove | null> {
+  const result = await pikafishAnalyze(board, side, { movetime: moveTimeMs }, onReady, onProgress, signal, history);
+  return result.best;
 }
