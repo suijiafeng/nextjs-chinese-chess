@@ -29,10 +29,10 @@ import type { AiLevel } from "@/lib/ai-client";
 import { ChessBoard } from "@/components/chess-board";
 import type { Coord, MovingPiece } from "@/components/chess-board";
 import { disposeGameSounds, playGameSound } from "@/lib/game-sounds";
+import type { GameSoundDetail, GameSoundKind } from "@/lib/game-sounds";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type GameMode = "ai" | "local";
-type SoundKind = "move" | "capture" | "check" | "win" | "lose" | "draw";
 
 interface MoveRecord extends AdjudicationMove {
   before: Board;
@@ -66,6 +66,7 @@ interface SaveData {
   times: { red: number; black: number };
   mode: GameMode;
   aiDifficulty: AiLevel;
+  playerSide?: Side;
   flipped: boolean;
   soundOn: boolean;
   result: GameResult | null;
@@ -106,6 +107,7 @@ export default function Home() {
   const [flipped, setFlipped] = useState(false);
   const [mode, setMode] = useState<GameMode>("ai");
   const [aiDifficulty, setAiDifficulty] = useState<AiLevel>("standard");
+  const [playerSide, setPlayerSide] = useState<Side>("red");
   const [pikafishReady, setPikafishReady] = useState(false);
   const [soundOn, setSoundOn] = useState(true);
   const [aiThinking, setAiThinking] = useState(false);
@@ -213,6 +215,7 @@ export default function Home() {
             timesRef.current = savedTimes;
             setMode(data.mode === "local" ? "local" : "ai");
             setAiDifficulty(data.aiDifficulty ?? "standard");
+            setPlayerSide(data.playerSide === "black" ? "black" : "red");
             setFlipped(!!data.flipped);
             setSoundOn(data.soundOn !== false);
             if (data.result) {
@@ -239,6 +242,7 @@ export default function Home() {
       times,
       mode,
       aiDifficulty,
+      playerSide,
       flipped,
       soundOn,
       result,
@@ -248,8 +252,9 @@ export default function Home() {
     } catch {
       // 存储不可用时忽略。
     }
-  }, [aiDifficulty, board, flipped, history, mode, restored, result, soundOn, times, turn]);
+  }, [aiDifficulty, board, flipped, history, mode, playerSide, restored, result, soundOn, times, turn]);
 
+  const aiSide: Side = playerSide === "red" ? "black" : "red";
   const reviewing = reviewPly !== null;
   const visiblePly = reviewPly ?? history.length;
   const visibleBoard = useMemo(() => {
@@ -270,20 +275,22 @@ export default function Home() {
     disposeGameSounds();
   }, []);
 
-  const playSound = useCallback((kind: SoundKind) => {
+  const playSound = useCallback((kind: GameSoundKind, detail?: GameSoundDetail) => {
     if (!soundOn) return;
     try {
-      playGameSound(kind);
+      playGameSound(kind, detail);
     } catch {
       // 声音不可用不影响对局本身。
     }
   }, [soundOn]);
 
-  const startNewGame = useCallback((nextMode: GameMode = mode) => {
+  const startNewGame = useCallback((nextMode: GameMode = mode, nextSide: Side = playerSide) => {
     hintRequestRef.current++;
     hintAbortRef.current?.abort();
     hintAbortRef.current = null;
     setMode(nextMode);
+    setPlayerSide(nextSide);
+    setFlipped(nextMode === "ai" && nextSide === "black");
     setBoard(initialBoard());
     setTurn("red");
     setSelected(null);
@@ -299,7 +306,7 @@ export default function Home() {
     setTimes({ red: 900, black: 900 });
     setReviewPly(null);
     setMoving(null);
-  }, [mode]);
+  }, [mode, playerSide]);
 
   const handleMoveDone = useCallback(() => setMoving(null), []);
 
@@ -383,8 +390,9 @@ export default function Home() {
     if (gameResult) setResultDismissed(false);
 
     if (!gameResult) {
-      if (gaveCheck) playSound("check");
-      else playSound(captured ? "capture" : "move");
+      const detail = { side: turn, actor, notation: record.notation, piece: piece.t };
+      if (gaveCheck) playSound("check", detail);
+      else playSound(captured ? "capture" : "move", detail);
     }
     return true;
   }, [board, history, playSound, turn]);
@@ -414,16 +422,16 @@ export default function Home() {
   useEffect(() => {
     if (!result) return;
     if (!result.winner) {
-      playSound("draw");
+      playSound("draw", { side: null });
       return;
     }
-    const lostToComputer = mode === "ai" && result.winner === "black";
-    playSound(lostToComputer ? "lose" : "win");
-  }, [mode, playSound, result]);
+    const lostToComputer = mode === "ai" && result.winner === aiSide;
+    playSound(lostToComputer ? "lose" : "win", { side: result.winner });
+  }, [aiSide, mode, playSound, result]);
 
   useEffect(() => {
-    if (mode !== "ai" || turn !== "black" || result || engineError || reviewing) return;
-    const searchBudget = aiSearchBudget(aiDifficulty, timesRef.current.black);
+    if (mode !== "ai" || turn !== aiSide || result || engineError || reviewing) return;
+    const searchBudget = aiSearchBudget(aiDifficulty, timesRef.current[aiSide]);
     const controller = new AbortController();
     let cancelled = false;
     const timer = window.setTimeout(async () => {
@@ -432,12 +440,12 @@ export default function Home() {
       try {
         const move = await analyzeAtLevel(board, aiDifficulty, {
           history,
-          side: "black",
+          side: aiSide,
           timeMs: searchBudget,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (cancelled) return;
         if (move) commitMove([move[0], move[1]], [move[2], move[3]], "ai");
-        else setResult({ winner: "red", message: "黑方无子可走，红方取胜" });
+        else setResult({ winner: playerSide, message: `${aiSide === "red" ? "红方" : "黑方"}无子可走，${playerSide === "red" ? "红方" : "黑方"}取胜` });
       } catch (error) {
         if (cancelled || isAbortError(error)) return;
         console.error("棋局计算失败", error);
@@ -451,10 +459,10 @@ export default function Home() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [aiDifficulty, board, commitMove, engineError, history, mode, result, reviewing, turn]);
+  }, [aiDifficulty, aiSide, board, commitMove, engineError, history, mode, playerSide, result, reviewing, turn]);
 
   const choosePoint = useCallback((r: number, c: number) => {
-    if (result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === "black")) return;
+    if (result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
     const piece = board[r][c];
 
     if (selected && targets.some(([tr, tc]) => tr === r && tc === c)) {
@@ -469,11 +477,13 @@ export default function Home() {
       setSelected(null);
       setTargets([]);
     }
-  }, [aiThinking, board, commitMove, hintThinking, mode, result, reviewing, selected, targets, turn]);
+  }, [aiSide, aiThinking, board, commitMove, hintThinking, mode, result, reviewing, selected, targets, turn]);
+
+  const canUndo = history.length > (mode === "ai" && playerSide === "black" ? 1 : 0);
 
   const undo = () => {
-    if (!history.length || aiThinking || hintThinking || reviewing) return;
-    const steps = mode === "ai" && turn === "red" && history.length >= 2 ? 2 : 1;
+    if (!history.length || aiThinking || hintThinking || reviewing || !canUndo) return;
+    const steps = mode === "ai" && turn === playerSide && history.length >= 2 ? 2 : 1;
     const restoreIndex = history.length - steps;
     const restore = history[restoreIndex];
     const remaining = history.slice(0, restoreIndex);
@@ -531,7 +541,7 @@ export default function Home() {
   };
 
   const requestHint = () => {
-    if (result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === "black")) return;
+    if (result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
     hintAbortRef.current?.abort();
     const controller = new AbortController();
     hintAbortRef.current = controller;
@@ -600,18 +610,19 @@ export default function Home() {
   const renderPlayer = (side: Side, top = false) => {
     const isRed = side === "red";
     const active = turn === side && !result && !engineError && !reviewing;
-    const thinking = active && aiThinking && side === "black";
-    const name = isRed ? "长安访客" : mode === "ai" ? "墨隐棋手" : "北境棋手";
+    const isAi = mode === "ai" && side === aiSide;
+    const thinking = active && aiThinking && isAi;
+    const name = isAi ? "墨隐棋手" : mode === "ai" ? "长安访客" : isRed ? "长安访客" : "北境棋手";
     const note = reviewing
       ? `复盘第 ${visiblePly} 手`
       : active
-      ? thinking ? `${AI_LEVEL_LABEL[aiDifficulty]}难度推演中` : "轮到此方"
-      : isRed ? "执红" : mode === "ai" ? "电脑执黑" : "执黑";
+      ? thinking ? `${AI_LEVEL_LABEL[aiDifficulty]}难度` : "轮到此方"
+      : isAi ? `电脑执${isRed ? "红" : "黑"}` : isRed ? "执红" : "执黑";
     return (
       <div className={`player-strip${top ? " player-strip-top" : ""}`}>
         <span className={`player-mark ${isRed ? "red-mark" : "black-mark"}${thinking ? " thinking-mark" : ""}`}>{isRed ? "帥" : "将"}</span>
         <span className="player-copy">
-          <b>{name}</b>
+          <b>{name}{thinking ? <span className="thinking-inline">思考中<span className="status-loading" aria-hidden="true"><i /><i /><i /></span></span> : null}</b>
           <small className={thinking ? "thinking-note" : undefined}>{note}</small>
         </span>
         <time className={active ? "active-clock" : ""}>{formatTime(times[side])}</time>
@@ -647,7 +658,7 @@ export default function Home() {
         : hint
           ? `建议 ${hint.notation}，棋盘已标出起点与落点`
           : selected ? `可走 ${targets.length} 处` : "请选择一枚棋子"));
-  const lostToComputer = mode === "ai" && result?.winner === "black";
+  const lostToComputer = mode === "ai" && result?.winner === aiSide;
   const isDraw = !!result && !result.winner;
   const outcomeTitle = isDraw
     ? "此局言和"
@@ -722,30 +733,48 @@ export default function Home() {
           </div>
 
           {mode === "ai" ? (
-            <>
-              <div className="ai-level" role="group" aria-label="选择电脑难度">
-                <span>电脑棋力</span>
-                {(Object.keys(AI_LEVEL_LABEL) as AiLevel[]).map((level) => (
-                  <button
-                    className={aiDifficulty === level ? "active" : ""}
-                    type="button"
-                    key={level}
-                    aria-pressed={aiDifficulty === level}
-                    onClick={() => {
-                      setAiDifficulty(level);
-                      setHint(null);
-                    }}
-                  >
-                    {AI_LEVEL_LABEL[level]}
-                  </button>
-                ))}
+            <div className="ai-setup">
+              <div className="setup-row">
+                <span className="setup-label">执子</span>
+                <div className="seg seg-2" role="group" aria-label="选择执子颜色（切换后重新开局）" title="切换后将重新开局">
+                  {(["red", "black"] as Side[]).map((side) => (
+                    <button
+                      className={`${side}-seg${playerSide === side ? " active" : ""}`}
+                      type="button"
+                      key={side}
+                      aria-pressed={playerSide === side}
+                      onClick={() => { if (side !== playerSide) startNewGame("ai", side); }}
+                    >
+                      <i aria-hidden="true">{side === "red" ? "帥" : "将"}</i>
+                      {side === "red" ? "红先" : "黑后"}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <p className="ai-level-note"><b>{AI_LEVEL_LABEL[aiDifficulty]}棋力</b>{AI_LEVEL_NOTE[aiDifficulty]}</p>
-            </>
+              <div className="setup-row">
+                <span className="setup-label">棋力</span>
+                <div className="seg seg-5" role="group" aria-label="选择电脑难度" title={AI_LEVEL_NOTE[aiDifficulty]}>
+                  {(Object.keys(AI_LEVEL_LABEL) as AiLevel[]).map((level) => (
+                    <button
+                      className={aiDifficulty === level ? "active" : ""}
+                      type="button"
+                      key={level}
+                      aria-pressed={aiDifficulty === level}
+                      title={AI_LEVEL_NOTE[level]}
+                      onClick={() => {
+                        setAiDifficulty(level);
+                        setHint(null);
+                      }}
+                    >
+                      {AI_LEVEL_LABEL[level]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
           ) : null}
 
           <div className={`turn-card${result ? " game-over" : ""}${ruleNotice ? " rule-limited" : ""}`} role="status" aria-live="polite">
-            <span className="eyebrow">本局状态</span>
             <div className="turn-title">
               <span className={`mini-piece ${turn === "black" ? "black-mini" : ""}`}>{turn === "red" ? "帥" : "将"}</span>
               <div>
@@ -756,8 +785,8 @@ export default function Home() {
           </div>
 
           <div className="control-row">
-            <button type="button" onClick={requestHint} disabled={!!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === "black")} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
-            <button type="button" onClick={undo} disabled={!history.length || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
+            <button type="button" onClick={requestHint} disabled={!!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
+            <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
             <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
             <button
               type="button"
