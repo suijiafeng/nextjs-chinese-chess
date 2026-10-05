@@ -5,6 +5,8 @@ import {
   findKing,
   inCheck,
   initialBoard,
+  chaseCandidates,
+  isPerpetualChaseMove,
   isPerpetualCheckMove,
   legalMoves,
   materialDrawAdjudication,
@@ -115,6 +117,49 @@ describe("基础规则", () => {
   });
 });
 
+/** 把四步循环重复三圈再多走一步：返回前 12 步历史与第 13 步（应被禁止的候选）。 */
+function cycleScenario(start: Board, cycle: [[number, number], [number, number]][]) {
+  let board = cloneBoard(start);
+  let side: Side = "red";
+  const records: AdjudicationMove[] = [];
+  for (let round = 0; round < 3; round++) {
+    for (const [from, to] of cycle) {
+      expect(board[from[0]][from[1]]?.side).toBe(side);
+      expect(legalMoves(board, from[0], from[1])).toContainEqual(to);
+      const record = realRecord(board, from, to, side);
+      board = applyMove(board, from, to);
+      records.push(record);
+      side = side === "red" ? "black" : "red";
+    }
+  }
+  const [from, to] = cycle[0];
+  const candidate = realRecord(board, from, to, "red");
+  return { history: records, candidate };
+}
+
+function applyMove(board: Board, from: [number, number], to: [number, number]): Board {
+  const next = cloneBoardSafe(board);
+  next[to[0]][to[1]] = next[from[0]][from[1]];
+  next[from[0]][from[1]] = null;
+  return next;
+}
+
+function realRecord(board: Board, from: [number, number], to: [number, number], side: Side): AdjudicationMove {
+  const piece = board[from[0]][from[1]]!;
+  const next = applyMove(board, from, to);
+  const nextTurn: Side = side === "red" ? "black" : "red";
+  const check = !!findKing(next, nextTurn) && inCheck(next, nextTurn);
+  return {
+    mover: { ...piece },
+    from,
+    to,
+    captured: board[to[0]][to[1]] ? { ...board[to[0]][to[1]]! } : null,
+    check,
+    positionKey: positionKey(next, nextTurn),
+    chaseCandidates: chaseCandidates(next, to, check),
+  };
+}
+
 describe("长将禁止", () => {
   it("单方连续第三次将军且局面重复时，isPerpetualCheckMove 返回 true", () => {
     const initial = initialBoard();
@@ -133,9 +178,56 @@ describe("长将禁止", () => {
     expect(isPerpetualCheckMove(positionKey(initial, "red"), history, candidate)).toBe(false);
   });
 
-  it("真实长将场景能被识别", () => {
-    // TODO: 构造一个合法的长将场景
-    // 当前测试棋盘坐标有问题，暂时跳过
+  it("真实长将场景：车来回将军，第四次同局面的将军被禁止", () => {
+    const board = emptyBoard();
+    place(board, 9, 4, { side: "red", t: "K" });
+    place(board, 0, 3, { side: "black", t: "K" });
+    place(board, 1, 0, { side: "red", t: "R" });
+    const { history, candidate } = cycleScenario(board, [
+      [[1, 0], [0, 0]],
+      [[0, 3], [1, 3]],
+      [[0, 0], [1, 0]],
+      [[1, 3], [0, 3]],
+    ]);
+    expect(history.filter(({ mover }) => mover.side === "red").every(({ check }) => check)).toBe(true);
+    expect(isPerpetualCheckMove(positionKey(board, "red"), history, candidate)).toBe(true);
+    // 少循环一圈时尚未构成长将。
+    expect(isPerpetualCheckMove(positionKey(board, "red"), history.slice(0, 8), history[8])).toBe(false);
+  });
+});
+
+describe("长捉禁止", () => {
+  it("真实长捉场景：车追炮无根循环，第四次同局面的追捉被禁止", () => {
+    const board = emptyBoard();
+    place(board, 9, 3, { side: "red", t: "K" });
+    place(board, 0, 5, { side: "black", t: "K" });
+    place(board, 6, 0, { side: "red", t: "R" });
+    place(board, 5, 4, { side: "black", t: "C" });
+    const { history, candidate } = cycleScenario(board, [
+      [[6, 0], [5, 0]],
+      [[5, 4], [6, 4]],
+      [[5, 0], [6, 0]],
+      [[6, 4], [5, 4]],
+    ]);
+    expect(candidate.check).toBe(false);
+    expect(isPerpetualChaseMove(positionKey(board, "red"), history, candidate)).toBe(true);
+    expect(isPerpetualChaseMove(positionKey(board, "red"), history.slice(0, 8), history[8])).toBe(false);
+  });
+
+  it("被追的炮有根（有子保护）时不算长捉", () => {
+    const board = emptyBoard();
+    place(board, 9, 3, { side: "red", t: "K" });
+    place(board, 0, 5, { side: "black", t: "K" });
+    place(board, 6, 0, { side: "red", t: "R" });
+    place(board, 5, 4, { side: "black", t: "C" });
+    place(board, 5, 8, { side: "black", t: "R" });
+    const { history, candidate } = cycleScenario(board, [
+      [[6, 0], [5, 0]],
+      [[5, 4], [6, 4]],
+      [[5, 0], [6, 0]],
+      [[6, 4], [5, 4]],
+    ]);
+    expect(isPerpetualChaseMove(positionKey(board, "red"), history, candidate)).toBe(false);
   });
 });
 
