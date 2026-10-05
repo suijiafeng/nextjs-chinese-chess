@@ -1,22 +1,11 @@
 "use client";
 
-import {
-  chaseCandidates,
-  cloneBoard,
-  findKing,
-  hasAnyMove,
-  inCheck,
-  initialBoard,
-  isPerpetualChaseMove,
-  isPerpetualCheckMove,
-  legalMoves,
-  materialDrawAdjudication,
-  naturalMoveAdjudication,
-  NAMES,
-  positionKey,
-  repetitionAdjudication,
-} from "@/lib/chess";
-import type { AdjudicationMove, Board, ChaseCandidate, Piece, Side } from "@/lib/chess";
+import { cloneBoard, findKing, inCheck, initialBoard, legalMoves, NAMES } from "@/lib/chess";
+import type { AdjudicationMove, Board, ChaseCandidate, Side } from "@/lib/chess";
+import { isBannedMove, moveNotation, playMove, REJECTION_MESSAGE, replayMoves } from "@/lib/game-core";
+import { defaultLanHost, LanClient, loadLanSession } from "@/lib/lan-client";
+import type { LanSession } from "@/lib/lan-client";
+import type { RoomSnapshot } from "@/server/room";
 import {
   AI_LEVEL_LABEL,
   AI_LEVEL_NOTE,
@@ -35,7 +24,20 @@ import type { AudioSettings } from "@/components/settings-panel";
 import type { GameSoundDetail, GameSoundKind } from "@/lib/game-sounds";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type GameMode = "ai" | "local";
+type GameMode = "ai" | "local" | "online";
+
+interface LanState {
+  /** idle：未进房；joining：连接中；waiting：等对手；playing：双方到齐 */
+  status: "idle" | "joining" | "waiting" | "playing";
+  code: string | null;
+  side: Side;
+  connected: boolean;
+  seats: { red: boolean; black: boolean };
+  pendingUndo: Side | null;
+  rematch: Side[];
+}
+
+const LAN_IDLE: LanState = { status: "idle", code: null, side: "red", connected: false, seats: { red: false, black: false }, pendingUndo: null, rematch: [] };
 
 interface MoveRecord extends AdjudicationMove {
   before: Board;
@@ -56,8 +58,6 @@ interface HintMove {
   to: Coord;
   notation: string;
 }
-
-const CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九"];
 
 const SAVE_KEY = "changan-xiangqi-save-v1";
 const SETTINGS_KEY = "changan-xiangqi-settings-v1";
@@ -82,50 +82,6 @@ function formatTime(total: number) {
   const minutes = Math.floor(total / 60).toString().padStart(2, "0");
   const seconds = (total % 60).toString().padStart(2, "0");
   return `${minutes}:${seconds}`;
-}
-
-function fileName(side: Side, col: number) {
-  return CN_NUM[side === "red" ? 8 - col : col];
-}
-
-function moveNotation(piece: Piece, from: Coord, to: Coord) {
-  const [fr, fc] = from;
-  const [tr, tc] = to;
-  const name = NAMES[piece.side][piece.t];
-  const origin = fileName(piece.side, fc);
-
-  if (fr === tr) return `${name}${origin}平${fileName(piece.side, tc)}`;
-
-  const forward = piece.side === "red" ? tr < fr : tr > fr;
-  const action = forward ? "进" : "退";
-  const destination = ["N", "B", "A"].includes(piece.t)
-    ? fileName(piece.side, tc)
-    : CN_NUM[Math.abs(tr - fr) - 1];
-  return `${name}${origin}${action}${destination}`;
-}
-
-/** 这手棋是否触犯长将/长捉禁着；外部引擎（Pikafish）不认这条规则，落子前必须复核。 */
-function isBannedMove(board: Board, history: MoveRecord[], turn: Side, from: Coord, to: Coord) {
-  const piece = board[from[0]][from[1]];
-  if (!piece) return false;
-  const next = cloneBoard(board);
-  next[to[0]][to[1]] = { ...piece };
-  next[from[0]][from[1]] = null;
-  const nextTurn: Side = turn === "red" ? "black" : "red";
-  const gaveCheck = !!findKing(next, nextTurn) && inCheck(next, nextTurn);
-  const record: AdjudicationMove = {
-    mover: { ...piece },
-    from,
-    to,
-    captured: board[to[0]][to[1]] ? { ...board[to[0]][to[1]]! } : null,
-    check: gaveCheck,
-    positionKey: positionKey(next, nextTurn),
-    chaseCandidates: chaseCandidates(next, to, gaveCheck),
-  };
-  const initialKey = positionKey(initialBoard(), "red");
-  return gaveCheck
-    ? isPerpetualCheckMove(initialKey, history, record)
-    : isPerpetualChaseMove(initialKey, history, record);
 }
 
 export default function Home() {
@@ -161,6 +117,17 @@ export default function Home() {
   const [started, setStarted] = useState(false);
   const [boardFullscreen, setBoardFullscreen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [lan, setLan] = useState<LanState>(LAN_IDLE);
+  const [lanHost, setLanHost] = useState("localhost");
+  const [joinCode, setJoinCode] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
+  const lanRef = useRef<LanClient | null>(null);
+  const commitMoveRef = useRef<(from: Coord, to: Coord, actor: "human" | "ai" | "remote") => boolean>(() => false);
+  const historyRef = useRef<MoveRecord[]>([]);
+  const playSoundRef = useRef<(kind: GameSoundKind, detail?: GameSoundDetail) => void>(() => undefined);
+  const landingByAiRef = useRef(false);
+  /** 悔棋时需要依次倒放多步，排队等上一段动画结束再播下一段。 */
+  const movingQueueRef = useRef<MovingPiece[]>([]);
   const [fullscreenError, setFullscreenError] = useState<string | null>(null);
   const fullscreenRef = useRef<HTMLElement>(null);
   const fullscreenButtonRef = useRef<HTMLButtonElement>(null);
@@ -253,7 +220,7 @@ export default function Home() {
             const savedTimes = data.times ?? { red: 900, black: 900 };
             setTimes(savedTimes);
             timesRef.current = savedTimes;
-            setMode(data.mode === "local" ? "local" : "ai");
+            setMode(data.mode === "local" ? "local" : data.mode === "online" ? "online" : "ai");
             setAiDifficulty(data.aiDifficulty ?? "standard");
             setPlayerSide(data.playerSide === "black" ? "black" : "red");
             setFlipped(!!data.flipped);
@@ -271,6 +238,117 @@ export default function Home() {
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
+  /** 把服务端快照同步到本地棋局；对手新落的一手走动画，其余情况（悔棋、重连、重开）静默重建。 */
+  const applySnapshot = useCallback((snap: RoomSnapshot, side: Side) => {
+    const local = historyRef.current;
+    const samePrefix = local.every((record, index) => {
+      const wire = snap.moves[index];
+      return wire && wire.from[0] === record.from[0] && wire.from[1] === record.from[1]
+        && wire.to[0] === record.to[0] && wire.to[1] === record.to[1];
+    });
+    if (samePrefix && snap.moves.length === local.length + 1) {
+      const next = snap.moves[local.length];
+      const mine = local.length % 2 === 0 ? "red" : "black";
+      if (mine !== side) commitMoveRef.current(next.from, next.to, "remote");
+    } else if (!samePrefix || snap.moves.length !== local.length) {
+      const { state, outcomes } = replayMoves(snap.moves);
+      let board = initialBoard();
+      let turn: Side = "red";
+      const records: MoveRecord[] = outcomes.map((outcome) => {
+        const record: MoveRecord = {
+          ...outcome.record,
+          before: cloneBoard(board),
+          turnBefore: turn,
+          notation: outcome.notation,
+          redTime: snap.times.red,
+          blackTime: snap.times.black,
+        };
+        board = outcome.state.board;
+        turn = outcome.state.turn;
+        return record;
+      });
+      if (snap.moves.length < local.length) playSoundRef.current("undo", { side: null });
+      setBoard(state.board);
+      setTurn(state.turn);
+      setHistory(records);
+      setSelected(null);
+      setTargets([]);
+      setHint(null);
+      setReviewPly(null);
+      movingQueueRef.current = [];
+      setMoving(null);
+      setLanding(null);
+    }
+    timesRef.current = snap.times;
+    setTimes(snap.times);
+    setStarted(snap.started);
+    setResult((current) => {
+      if (snap.result && !current) setResultDismissed(false);
+      return snap.result ? { winner: snap.result.winner, message: snap.result.message } : null;
+    });
+    setFlipped(side === "black");
+    setLan((current) => ({
+      ...current,
+      status: snap.seats.red && snap.seats.black ? "playing" : "waiting",
+      code: snap.code,
+      side,
+      seats: snap.seats,
+      pendingUndo: snap.pendingUndo,
+      rematch: snap.rematch,
+    }));
+  }, []);
+
+  const ensureLan = useCallback(() => {
+    if (lanRef.current) return lanRef.current;
+    const client = new LanClient({
+      onSeated: (session, snapshot) => {
+        setLan((current) => ({ ...current, status: "waiting", code: session.code, side: session.side, connected: true }));
+        applySnapshot(snapshot, session.side);
+      },
+      onState: (snapshot, side) => applySnapshot(snapshot, side),
+      onError: (message) => {
+        setRuleNotice(message);
+        setLan((current) => current.status === "joining" ? { ...current, status: "idle" } : current);
+      },
+      onConnection: (connected) => setLan((current) => ({ ...current, connected })),
+    });
+    lanRef.current = client;
+    return client;
+  }, [applySnapshot]);
+
+  useEffect(() => () => lanRef.current?.dispose(), []);
+
+  useEffect(() => {
+    if (!restored) return;
+    const timer = window.setTimeout(() => {
+      setLanHost(defaultLanHost());
+      const params = new URLSearchParams(window.location.search);
+      const roomParam = params.get("room");
+      const hostParam = params.get("host");
+      if (roomParam) {
+        // 通过链接进来：直接加入房间。
+        window.history.replaceState(null, "", window.location.pathname);
+        setMode("online");
+        setLan({ ...LAN_IDLE, status: "joining" });
+        ensureLan().join(hostParam ?? defaultLanHost(), roomParam);
+        return;
+      }
+      if (mode !== "online") return;
+      const session = loadLanSession();
+      if (session) {
+        setLan({ ...LAN_IDLE, status: "joining", side: session.side });
+        ensureLan().resume(session);
+      }
+      // 没有可恢复的会话则停在联机大厅。
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restored]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -362,10 +440,9 @@ export default function Home() {
       // 声音不可用不影响对局本身。
     }
   }, [soundOn]);
-
-  const landingByAiRef = useRef(false);
-  /** 悔棋时需要依次倒放多步，排队等上一段动画结束再播下一段。 */
-  const movingQueueRef = useRef<MovingPiece[]>([]);
+  useEffect(() => {
+    playSoundRef.current = playSound;
+  }, [playSound]);
 
   const startNewGame = useCallback((nextMode: GameMode = mode, nextSide: Side = playerSide) => {
     hintRequestRef.current++;
@@ -391,7 +468,66 @@ export default function Home() {
     movingQueueRef.current = [];
     setMoving(null);
     setStarted(false);
+    if (nextMode !== "online" && lanRef.current?.current) lanRef.current.leave();
+    if (nextMode !== "online") setLan(LAN_IDLE);
   }, [mode, playerSide]);
+
+  const lanCreate = (side: Side) => {
+    setLan({ ...LAN_IDLE, status: "joining", side });
+    ensureLan().create(lanHost.trim() || defaultLanHost(), side);
+  };
+
+  const lanJoin = () => {
+    const code = joinCode.trim();
+    if (code.length !== 4) {
+      setRuleNotice("房间码是 4 位数字");
+      return;
+    }
+    setLan({ ...LAN_IDLE, status: "joining" });
+    ensureLan().join(lanHost.trim() || defaultLanHost(), code);
+  };
+
+  /** 邀请链接：主机名用服务地址，这样对方在别的设备上打开也能连上。 */
+  const inviteLink = (() => {
+    if (!lan.code || typeof window === "undefined") return "";
+    const host = lanHost.trim() || window.location.hostname;
+    const port = window.location.port ? `:${window.location.port}` : "";
+    return `${window.location.protocol}//${host}${port}/?room=${lan.code}&host=${host}`;
+  })();
+
+  const copyInviteLink = async () => {
+    if (!inviteLink) return;
+    try {
+      await navigator.clipboard.writeText(inviteLink);
+    } catch {
+      // 非安全上下文（如 http://192.168.x.x）没有 clipboard API，退回到选中文本的方式。
+      const input = document.createElement("textarea");
+      input.value = inviteLink;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.appendChild(input);
+      input.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        input.remove();
+      }
+    }
+    setLinkCopied(true);
+  };
+
+  useEffect(() => {
+    if (!linkCopied) return;
+    const timer = window.setTimeout(() => setLinkCopied(false), 1800);
+    return () => window.clearTimeout(timer);
+  }, [linkCopied]);
+
+  const lanLeave = () => {
+    lanRef.current?.leave();
+    startNewGame("online");
+    setLan(LAN_IDLE);
+  };
 
   const beginGame = () => {
     if (started) return;
@@ -421,99 +557,57 @@ export default function Home() {
 
   const shake = useCallback((coord: Coord) => setShaking([coord[0], coord[1]]), []);
 
-  const commitMove = useCallback((from: Coord, to: Coord, actor: "human" | "ai" = "human") => {
-    const [fr, fc] = from;
-    const [tr, tc] = to;
-    const piece = board[fr]?.[fc];
-    if (!piece || piece.side !== turn) return false;
-
-    const allowed = legalMoves(board, fr, fc).some(([r, c]) => r === tr && c === tc);
-    if (!allowed) return false;
-
-    const before = cloneBoard(board);
-    const captured = board[tr][tc] ? { ...board[tr][tc]! } : null;
-    const next = cloneBoard(board);
-    next[tr][tc] = { ...piece };
-    next[fr][fc] = null;
-
-    const nextTurn: Side = turn === "red" ? "black" : "red";
-    const kingAlive = !!findKing(next, nextTurn);
-    const gaveCheck = kingAlive && inCheck(next, nextTurn);
+  const commitMove = useCallback((from: Coord, to: Coord, actor: "human" | "ai" | "remote" = "human") => {
+    const outcome = playMove({ board, turn, history, result: null }, from, to);
+    if (!outcome.ok) {
+      if (outcome.reason === "perpetual-check" || outcome.reason === "perpetual-chase") {
+        playSound("illegal", { side: turn });
+        shake(from);
+        setRuleNotice(REJECTION_MESSAGE[outcome.reason]);
+        setSelected(null);
+        setTargets([]);
+        setHint(null);
+      }
+      return false;
+    }
+    const { record: core, notation, gaveCheck, captured, state } = outcome;
+    const piece = core.mover;
     const record: MoveRecord = {
-      before,
+      ...core,
+      before: cloneBoard(board),
       turnBefore: turn,
-      from,
-      to,
-      mover: { ...piece },
-      captured,
-      notation: moveNotation(piece, from, to),
-      check: gaveCheck,
-      positionKey: positionKey(next, nextTurn),
-      chaseCandidates: chaseCandidates(next, to, gaveCheck),
+      notation,
       redTime: timesRef.current.red,
       blackTime: timesRef.current.black,
     };
-    const nextHistory = [...history, record];
-    const isPerpetualCheck = gaveCheck
-      && isPerpetualCheckMove(positionKey(initialBoard(), "red"), history, record);
-    const isPerpetualChase = !gaveCheck
-      && isPerpetualChaseMove(positionKey(initialBoard(), "red"), history, record);
-    if (isPerpetualCheck) {
-      playSound("illegal", { side: turn });
-      shake(from);
-      setRuleNotice("禁止长将：不能连续将军超过三次");
-      setSelected(null);
-      setTargets([]);
-      setHint(null);
-      return false;
-    }
-    if (isPerpetualChase) {
-      playSound("illegal", { side: turn });
-      shake(from);
-      setRuleNotice("禁止长捉：不能连续捉同一子超过三次");
-      setSelected(null);
-      setTargets([]);
-      setHint(null);
-      return false;
-    }
-    const repetitionResult = repetitionAdjudication(positionKey(initialBoard(), "red"), nextHistory);
-    let gameResult: GameResult | null = null;
-
-    if (!kingAlive) {
-      gameResult = { winner: turn, message: `${turn === "red" ? "红方" : "黑方"}擒将取胜` };
-    } else if (!hasAnyMove(next, nextTurn)) {
-      gameResult = {
-        winner: turn,
-        message: gaveCheck ? "将死，对局结束" : "困毙，对局结束",
-      };
-    } else {
-      gameResult = materialDrawAdjudication(next)
-        ?? repetitionResult
-        ?? naturalMoveAdjudication(nextHistory);
-    }
+    const gameResult: GameResult | null = state.result;
 
     setRuleNotice(null);
-    setBoard(next);
-    setHistory(nextHistory);
+    setBoard(state.board);
+    setHistory([...history, record]);
     setSelected(null);
     setTargets([]);
     setHint(null);
-    setTurn(nextTurn);
+    setTurn(state.turn);
     setReviewPly(null);
     setResult(gameResult);
-    landingByAiRef.current = actor === "ai";
+    landingByAiRef.current = actor !== "human";
     setLanding(null);
     movingQueueRef.current = [];
     setMoving({ piece: { ...piece }, from, to, captured });
     if (gameResult) setResultDismissed(false);
 
     if (!gameResult) {
-      const detail = { side: turn, actor, notation: record.notation, piece: piece.t };
+      const detail = { side: turn, actor: actor === "remote" ? "human" as const : actor, notation, piece: piece.t };
       if (gaveCheck) playSound("check", detail);
       else playSound(captured ? "capture" : "move", detail);
     }
     return true;
   }, [board, history, playSound, shake, turn]);
+
+  useEffect(() => {
+    commitMoveRef.current = commitMove;
+  }, [commitMove]);
 
   useEffect(() => {
     if (!ruleNotice) return;
@@ -528,17 +622,17 @@ export default function Home() {
       const nextTimes = { ...timesRef.current, [turn]: remaining };
       timesRef.current = nextTimes;
       setTimes(nextTimes);
-      const humanClock = mode === "local" || turn === playerSide;
+      const humanClock = mode === "local" || (mode === "online" ? turn === lan.side : turn === playerSide);
       if (humanClock && (remaining === 60 || remaining === 30)) playSound("lowtime", { side: turn });
       else if (humanClock && remaining > 0 && remaining <= 10) playSound("tick", { side: turn });
-      if (remaining === 0) {
+      if (remaining === 0 && mode !== "online") {
         const winner: Side = turn === "red" ? "black" : "red";
         setResult({ winner, message: `${turn === "red" ? "红方" : "黑方"}用时耗尽` });
         setResultDismissed(false);
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [engineError, hintThinking, mode, playSound, playerSide, result, reviewing, started, turn]);
+  }, [engineError, hintThinking, lan.side, mode, playSound, playerSide, result, reviewing, started, turn]);
 
   useEffect(() => {
     if (!result) return;
@@ -580,7 +674,7 @@ export default function Home() {
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (cancelled) return;
         let chosen = move;
-        if (chosen && isBannedMove(board, history, aiSide, [chosen[0], chosen[1]], [chosen[2], chosen[3]])) {
+        if (chosen && isBannedMove({ board, turn: aiSide, history, result: null }, [chosen[0], chosen[1]], [chosen[2], chosen[3]])) {
           // Pikafish 选了长将/长捉着法：改用内置引擎，它会自行排除禁着。
           chosen = await analyzeAtLevel(board, "hard", {
             history,
@@ -610,10 +704,12 @@ export default function Home() {
 
   const choosePoint = useCallback((r: number, c: number) => {
     if (!started || result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
+    if (mode === "online" && (turn !== lan.side || !lan.connected || lan.pendingUndo)) return;
     const piece = board[r][c];
 
     if (selected && targets.some(([tr, tc]) => tr === r && tc === c)) {
-      commitMove(selected, [r, c]);
+      const from = selected;
+      if (commitMove(from, [r, c]) && mode === "online") lanRef.current?.move(from, [r, c]);
       return;
     }
 
@@ -625,12 +721,18 @@ export default function Home() {
       // 点了不能走的位置：棋子抖一下，保持选中，避免玩家以为没反应。
       shake(selected);
     }
-  }, [aiSide, aiThinking, board, commitMove, playSound, hintThinking, mode, result, reviewing, selected, shake, started, targets, turn]);
+  }, [aiSide, aiThinking, board, commitMove, lan.connected, lan.pendingUndo, lan.side, playSound, hintThinking, mode, result, reviewing, selected, shake, started, targets, turn]);
 
-  const canUndo = history.length > (mode === "ai" && playerSide === "black" ? 1 : 0);
+  const canUndo = mode === "online"
+    ? started && !result && !lan.pendingUndo && history.some((record) => record.mover.side === lan.side)
+    : history.length > (mode === "ai" && playerSide === "black" ? 1 : 0);
 
   const undo = () => {
     if (!history.length || aiThinking || hintThinking || reviewing || !canUndo) return;
+    if (mode === "online") {
+      lanRef.current?.requestUndo();
+      return;
+    }
     const steps = mode === "ai" && turn === playerSide && history.length >= 2 ? 2 : 1;
     const restoreIndex = history.length - steps;
     const restore = history[restoreIndex];
@@ -675,6 +777,10 @@ export default function Home() {
     hintRequestRef.current++;
     hintAbortRef.current?.abort();
     hintAbortRef.current = null;
+    if (mode === "online") {
+      lanRef.current?.resign();
+      return;
+    }
     const winner: Side = turn === "red" ? "black" : "red";
     setSelected(null);
     setTargets([]);
@@ -720,7 +826,7 @@ export default function Home() {
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) return;
-        if (isBannedMove(board, history, turn, [move[0], move[1]], [move[2], move[3]])) {
+        if (isBannedMove({ board, turn, history, result: null }, [move[0], move[1]], [move[2], move[3]])) {
           const safe = await analyzeAtLevel(board, "hard", {
             history,
             side: turn,
@@ -776,14 +882,26 @@ export default function Home() {
   const topSide: Side = flipped ? "red" : "black";
   const bottomSide: Side = flipped ? "black" : "red";
 
+  /** 已进入对局（双方到齐过），即使对方暂时掉线也按对局中处理。 */
+  const lanInGame = mode === "online" && !!lan.code && (lan.status === "playing" || started);
+
   const renderPlayer = (side: Side, top = false) => {
     const isRed = side === "red";
     const active = turn === side && !result && !engineError && !reviewing;
     const isAi = mode === "ai" && side === aiSide;
     const thinking = active && aiThinking && isAi;
-    const name = isAi ? "墨隐棋手" : mode === "ai" ? "长安访客" : isRed ? "长安访客" : "北境棋手";
+    const isMe = mode === "online" && side === lan.side;
+    const isRemote = mode === "online" && !isMe;
+    const name = mode === "online"
+      ? isMe ? "你" : "对手"
+      : isAi ? "墨隐棋手" : mode === "ai" ? "长安访客" : isRed ? "长安访客" : "北境棋手";
+    const seatNote = isRemote
+      ? lan.seats[side] ? "已连接" : lanInGame ? "对手掉线，等待重连" : "等待加入"
+      : isMe && !lan.connected ? "连接断开，重连中" : null;
     const note = reviewing
       ? `复盘第 ${visiblePly} 手`
+      : seatNote && (!active || !lan.seats[side] || !lan.connected)
+      ? seatNote
       : active
       ? thinking ? `${AI_LEVEL_LABEL[aiDifficulty]}难度` : "轮到此方"
       : isAi ? `电脑执${isRed ? "红" : "黑"}` : isRed ? "执红" : "执黑";
@@ -801,7 +919,7 @@ export default function Home() {
 
   const renderControls = (extraClass = "") => (
     <div className={`control-row${extraClass ? ` ${extraClass}` : ""}`}>
-            <button type="button" onClick={requestHint} disabled={!started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
+            <button type="button" onClick={requestHint} disabled={mode === "online" || !started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
             <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
             <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
             <button
@@ -810,11 +928,18 @@ export default function Home() {
               disabled={!started || !!result || !!engineError || reviewing}
               aria-label="认输"
             >⚑ <span>认输</span></button>
-            <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>
+            {mode === "online"
+              ? <button type="button" onClick={lanLeave} disabled={lan.status === "idle"} aria-label="离开房间">⇠ <span>离开</span></button>
+              : <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>}
           </div>
   );
 
-  const statusTitle = !started && !result
+  const lanWaiting = mode === "online" && lan.status !== "playing" && !(started && lan.code);
+  const statusTitle = mode === "online" && lan.pendingUndo
+    ? lan.pendingUndo === lan.side ? "等待对方同意悔棋" : "对方请求悔棋"
+    : lanWaiting
+    ? lan.status === "idle" ? "局域网对弈" : lan.status === "joining" ? "正在连接" : "等待对手"
+    : !started && !result
     ? "准备就绪"
     : engineError
     ? "计算暂停"
@@ -832,7 +957,11 @@ export default function Home() {
         ? `${turn === "red" ? "红方" : "黑方"}被将军`
         : `${turn === "red" ? "红方" : "黑方"}行棋`;
   const statusLoading = !engineError && !reviewing && !result && (aiThinking || hintThinking);
-  const statusNote = !started && !result ? "点击棋盘上的「开始」进入对局" : engineError ?? ruleNotice ?? (reviewing
+  const statusNote = mode === "online" && lan.pendingUndo && !ruleNotice
+    ? lan.pendingUndo === lan.side ? "对方同意后将撤回你的最后一手" : "同意后将撤回对方的最后一手"
+    : lanWaiting && !ruleNotice
+    ? lan.status === "idle" ? "创建房间或输入房间码加入" : lan.status === "joining" ? "正在连接局域网服务…" : `房间码 ${lan.code}，等待对方加入`
+    : !started && !result ? "点击棋盘上的「开始」进入对局" : engineError ?? ruleNotice ?? (reviewing
     ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
     : result?.message
     ?? (aiThinking
@@ -844,13 +973,13 @@ export default function Home() {
         : hint
           ? `建议 ${hint.notation}，棋盘已标出起点与落点`
           : selected ? `可走 ${targets.length} 处` : "请选择一枚棋子"));
-  const lostToComputer = mode === "ai" && result?.winner === aiSide;
+  const lostToComputer = (mode === "ai" && result?.winner === aiSide) || (mode === "online" && !!result?.winner && result.winner !== lan.side);
   const isDraw = !!result && !result.winner;
   const outcomeTitle = isDraw
     ? "此局言和"
     : lostToComputer
     ? "此局惜败"
-    : mode === "ai"
+    : mode === "ai" || mode === "online"
       ? "你赢了"
       : `${result?.winner === "red" ? "红方" : "黑方"}胜`;
 
@@ -905,14 +1034,62 @@ export default function Home() {
             onMoveDone={handleMoveDone}
             onChoose={choosePoint}
           />
-          {!started && !result && !reviewing ? (
+          {mode === "online" && lan.status !== "playing" && !(started && lan.code) ? (
+            <div className="ready-overlay">
+              <div className="ready-card lan-card">
+                <span className="ready-seal" aria-hidden="true">棋</span>
+                {lan.status === "idle" ? (
+                  <>
+                    <b>局域网对弈</b>
+                    <label className="lan-field">
+                      <span>服务地址</span>
+                      <input value={lanHost} onChange={(event) => setLanHost(event.target.value)} spellCheck={false} placeholder="运行 npm run lan 的电脑地址" />
+                    </label>
+                    <div className="lan-actions">
+                      <button type="button" className="ready-button" onClick={() => lanCreate("red")}>创建房间 · 执红</button>
+                      <button type="button" className="ready-button ready-button-dark" onClick={() => lanCreate("black")}>创建房间 · 执黑</button>
+                    </div>
+                    <div className="lan-join">
+                      <input
+                        value={joinCode}
+                        onChange={(event) => setJoinCode(event.target.value.replace(/\D/g, "").slice(0, 4))}
+                        onKeyDown={(event) => { if (event.key === "Enter") lanJoin(); }}
+                        inputMode="numeric"
+                        placeholder="房间码"
+                        aria-label="房间码"
+                      />
+                      <button type="button" onClick={lanJoin} disabled={joinCode.length !== 4}>加入</button>
+                    </div>
+                  </>
+                ) : lan.status === "joining" ? (
+                  <>
+                    <b>正在连接</b>
+                    <small>连接局域网服务…</small>
+                    <button type="button" className="lan-cancel" onClick={lanLeave}>取消</button>
+                  </>
+                ) : (
+                  <>
+                    <small>房间码</small>
+                    <b className="lan-code">{lan.code}</b>
+                    <small>你执{lan.side === "red" ? "红" : "黑"} · 等待对方加入{lan.connected ? "" : " · 连接断开"}</small>
+                    <div className="lan-invite">
+                      <input value={inviteLink} readOnly aria-label="邀请链接" onFocus={(event) => event.target.select()} />
+                      <button type="button" className={linkCopied ? "copied" : ""} onClick={copyInviteLink}>{linkCopied ? "已复制" : "复制链接"}</button>
+                    </div>
+                    <small>对方在同一网络打开此链接即可加入</small>
+                    <button type="button" className="lan-cancel" onClick={lanLeave}>离开房间</button>
+                  </>
+                )}
+              </div>
+            </div>
+          ) : !started && !result && !reviewing && mode !== "online" ? (
             <div className="ready-overlay">
               <div className="ready-card">
                 <span className="ready-seal" aria-hidden="true">棋</span>
                 <small>
                   {mode === "ai"
                     ? `人机对弈 · 你执${playerSide === "red" ? "红先行" : "黑后行"} · ${AI_LEVEL_LABEL[aiDifficulty]}`
-                    : "双人对弈 · 红方先行"}
+                    : "同屏对弈 · 红方先行"}
                 </small>
                 <button type="button" className="ready-button" onClick={beginGame} autoFocus>
                   开始对局
@@ -944,8 +1121,30 @@ export default function Home() {
           </div>
           <div className="mode-switch" role="group" aria-label="选择对局模式">
             <button className={mode === "ai" ? "active" : ""} type="button" onClick={() => startNewGame("ai")}>人机对弈</button>
-            <button className={mode === "local" ? "active" : ""} type="button" onClick={() => startNewGame("local")}>双人对弈</button>
+            <button className={mode !== "ai" ? "active" : ""} type="button" onClick={() => { if (mode === "ai") startNewGame("local"); }}>双人对弈</button>
           </div>
+
+          {mode !== "ai" ? (
+            <div className="ai-setup">
+              <div className="setup-row">
+                <span className="setup-label">方式</span>
+                <div className="seg seg-2" role="group" aria-label="选择双人对弈方式">
+                  <button className={mode === "local" ? "active" : ""} type="button" aria-pressed={mode === "local"} title="两人共用这台设备轮流落子" onClick={() => { if (mode !== "local") startNewGame("local"); }}>同屏对弈</button>
+                  <button className={mode === "online" ? "active" : ""} type="button" aria-pressed={mode === "online"} title="两台设备通过局域网对弈" onClick={() => { if (mode !== "online") startNewGame("online"); }}>局域网对弈</button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {lanInGame ? (
+            <div className="lan-bar">
+              <span>房间 <b>{lan.code}</b></span>
+              <span>你执{lan.side === "red" ? "红" : "黑"}</span>
+              <span className={lan.connected && lan.seats[lan.side === "red" ? "black" : "red"] ? "lan-ok" : "lan-bad"}>
+                {!lan.connected ? "重连中" : lan.seats[lan.side === "red" ? "black" : "red"] ? "对手在线" : "对手离线"}
+              </span>
+            </div>
+          ) : null}
 
           {mode === "ai" ? (
             <div className="ai-setup">
@@ -988,6 +1187,12 @@ export default function Home() {
               </div>
             </div>
           ) : null}
+
+          <div className={`board-status${result ? " game-over" : ""}${ruleNotice ? " rule-limited" : ""}`} role="status" aria-live="polite">
+            <span className={`mini-piece ${turn === "black" ? "black-mini" : ""}`}>{turn === "red" ? "帥" : "将"}</span>
+            <b>{statusTitle}{statusLoading ? <span className="status-loading" aria-hidden="true"><i /><i /><i /></span> : null}</b>
+            <small>{statusNote}</small>
+          </div>
 
           {renderControls("controls-desktop")}
 
@@ -1051,8 +1256,24 @@ export default function Home() {
             <h2 id="outcome-title">{outcomeTitle}</h2>
             <p>{result.message}</p>
             <div className="outcome-actions">
-              <button type="button" onClick={() => startNewGame()} autoFocus>再来一局</button>
+              {mode === "online"
+                ? <button type="button" onClick={() => lanRef.current?.rematch()} disabled={lan.rematch.includes(lan.side)} autoFocus>{lan.rematch.includes(lan.side) ? "等待对方同意…" : lan.rematch.length ? "对方想再来一局 · 同意" : "再来一局"}</button>
+                : <button type="button" onClick={() => startNewGame()} autoFocus>再来一局</button>}
               <button type="button" onClick={() => reviewTo(history.length)}>复盘棋局</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {mode === "online" && lan.pendingUndo && lan.pendingUndo !== lan.side ? (
+        <div className="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="undo-title">
+          <div className="confirm-card">
+            <div className="confirm-seal" aria-hidden="true"><span>悔</span></div>
+            <h2 id="undo-title">对方请求悔棋</h2>
+            <p>同意后将撤回对方的最后一手{turn !== lan.pendingUndo ? "" : "，以及你的回应"}。</p>
+            <div className="confirm-actions">
+              <button type="button" onClick={() => lanRef.current?.replyUndo(true)} autoFocus>同意</button>
+              <button type="button" onClick={() => lanRef.current?.replyUndo(false)}>拒绝</button>
             </div>
           </div>
         </div>
@@ -1064,7 +1285,9 @@ export default function Home() {
             <button type="button" className="dialog-close" onClick={() => setResignConfirm(false)} aria-label="关闭">✕</button>
             <div className="confirm-seal" aria-hidden="true"><span>認</span></div>
             <h2 id="resign-title">确定认输？</h2>
-            <p>当前轮到{turn === "red" ? "红方" : "黑方"}行棋，认输将判{turn === "red" ? "黑方" : "红方"}取胜，且不可撤销。</p>
+            <p>{mode === "online"
+              ? `认输将判对方取胜，且不可撤销。`
+              : `当前轮到${turn === "red" ? "红方" : "黑方"}行棋，认输将判${turn === "red" ? "黑方" : "红方"}取胜，且不可撤销。`}</p>
             <div className="confirm-actions">
               <button type="button" onClick={confirmResign} autoFocus>确定认输</button>
               <button type="button" onClick={() => setResignConfirm(false)}>继续对局</button>
