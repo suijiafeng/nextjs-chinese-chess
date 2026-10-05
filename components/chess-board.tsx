@@ -26,9 +26,20 @@ interface ChessBoardProps {
   lastMove: MoveMarker;
   hint: MoveMarker;
   moving: MovingPiece | null;
+  /** 对方刚落下的位置，做一次脉冲高亮把视线拉回棋盘。 */
+  landing: Coord | null;
+  /** 被拒绝的走法对应的棋子，抖动一次。 */
+  shaking: Coord | null;
   onMoveDone: () => void;
   onChoose: (row: number, col: number) => void;
 }
+
+/** 炮位与兵卒初始位的标记点。 */
+const STAR_POINTS: Coord[] = [
+  [2, 1], [2, 7], [7, 1], [7, 7],
+  [3, 0], [3, 2], [3, 4], [3, 6], [3, 8],
+  [6, 0], [6, 2], [6, 4], [6, 6], [6, 8],
+];
 
 function sameCoord(coord: Coord | null | undefined, row: number, col: number) {
   return coord?.[0] === row && coord[1] === col;
@@ -52,6 +63,8 @@ function ChessBoardView({
   lastMove,
   hint,
   moving,
+  landing,
+  shaking,
   onMoveDone,
   onChoose,
 }: ChessBoardProps) {
@@ -123,6 +136,22 @@ function ChessBoardView({
               <path key={`col-${index}`} d={`M${(index + 1) * 100} 0V400M${(index + 1) * 100} 500V900`} />
             ))}
             <path d="M300 0L500 200M500 0L300 200M300 700L500 900M500 700L300 900" />
+            {STAR_POINTS.map(([row, col]) => {
+              const x = col * 100;
+              const y = row * 100;
+              const gap = 7;
+              const length = 22;
+              const arms: string[] = [];
+              if (col > 0) {
+                arms.push(`M${x - gap} ${y - gap - length}V${y - gap}H${x - gap - length}`);
+                arms.push(`M${x - gap} ${y + gap + length}V${y + gap}H${x - gap - length}`);
+              }
+              if (col < 8) {
+                arms.push(`M${x + gap} ${y - gap - length}V${y - gap}H${x + gap + length}`);
+                arms.push(`M${x + gap} ${y + gap + length}V${y + gap}H${x + gap + length}`);
+              }
+              return <path key={`star-${row}-${col}`} className="board-star" d={arms.join("")} />;
+            })}
           </svg>
           <span className="river"><b>楚 河</b><b>漢 界</b></span>
         </div>
@@ -155,6 +184,8 @@ function ChessBoardView({
               hintTo ? "hint-to" : "",
               kingChecked ? "king-check" : "",
               arrivingHere && piece ? "moving-hidden" : "",
+              !arrivingHere && sameCoord(landing, row, col) ? "landing" : "",
+              sameCoord(shaking, row, col) ? "shaking" : "",
             ].filter(Boolean).join(" ");
             const label = piece
               ? `${piece.side === "red" ? "红方" : "黑方"}${NAMES[piece.side][piece.t]}，第${row + 1}行第${col + 1}列`
