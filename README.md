@@ -28,7 +28,8 @@
 
 ## 功能亮点
 
-- 人机对弈与本地双人对弈
+- 人机对弈、本地双人对弈与局域网对弈
+- 自定义开局（摆棋）：开局卡片「开始对局」旁的下拉菜单里选「编辑开局」，可摆残局、指定先行方，规则校验后开局；仅对当前一局有效，重开回到标准开局
 - 入门、普通、困难、大师、宗师五档棋力
 - 严格处理马腿、象眼、炮架、九宫、过河兵卒和将帅照面
 - 检测送将、将军、将死、困毙与擒将
@@ -128,13 +129,22 @@ Pikafish 多线程运行依赖跨源隔离能力。项目已经在 [`next.config
 ├── app/
 │   ├── globals.css            # 全局样式、响应式布局与动画
 │   ├── layout.tsx             # 页面布局和社交分享元数据
-│   └── page.tsx               # 对局状态与交互流程
+│   ├── page.tsx               # 对局状态与交互流程（含摆棋编辑器）
+│   └── arena/page.tsx         # 棋力标定页（相邻档位互弈）
 ├── components/
-│   └── chess-board.tsx        # 棋盘、棋子和键盘操作
+│   ├── chess-board.tsx        # 棋盘、棋子和键盘操作
+│   └── settings-panel.tsx     # 音效与音乐设置
 ├── lib/
 │   ├── ai-client.ts           # AI 难度、Worker 调度和降级处理
 │   ├── chess.ts               # 象棋规则、裁定、开局库与搜索引擎
+│   ├── game-core.ts           # 与界面无关的对局推进（浏览器与服务端共用）
+│   ├── setup.ts               # 摆棋规则：棋子可放位置、数量上限、开局校验
+│   ├── lan-client.ts          # 局域网对弈客户端（重连、座位恢复）
 │   └── pikafish.ts            # Pikafish 生命周期与协议封装
+├── server/
+│   ├── lan.ts                 # 局域网中转服务（npm run lan）
+│   ├── room.ts                # 房间纯逻辑：计时、悔棋协商、再来一局
+│   └── protocol.ts            # 浏览器与服务端共用的消息定义
 ├── workers/
 │   └── chess-ai.worker.ts     # 内置 AI 后台搜索入口
 └── public/
@@ -184,6 +194,8 @@ npm run lan
 ```bash
 npm run dev:lan
 ```
+
+开发模式下 Next.js 会拦截来自非本机地址的资源请求；项目已在 [`next.config.ts`](./next.config.ts) 里把本机局域网 IP 和常见私有网段加入 `allowedDevOrigins`，对方用 `http://<主机地址>:3000` 打开即可。
 
 然后：
 

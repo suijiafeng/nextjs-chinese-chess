@@ -851,3 +851,50 @@ footer b { padding-left: 12px; border-left: 1px solid rgba(84,72,54,.14); color:
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation-duration: .001ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* ---------- 摆棋（自定义开局） ---------- */
+.ready-split {
+  position: relative; display: inline-flex; align-items: stretch; margin-top: 4px; border-radius: 999px;
+  background: linear-gradient(180deg, #b8372f, #962520); color: #fbf1e3;
+  box-shadow: 0 6px 18px rgba(150, 37, 32, .4), inset 0 1px 0 rgba(255,255,255,.22), inset 0 -2px 0 rgba(0,0,0,.18);
+  transition: transform .14s ease, box-shadow .14s ease, filter .14s ease; animation: ready-pulse 2.2s ease-in-out 1s infinite;
+}
+.ready-split:hover { transform: translateY(-1px); filter: brightness(1.06); }
+.ready-split .ready-button { margin-top: 0; background: transparent; box-shadow: none; animation: none; transition: background .14s ease; }
+.ready-split .ready-button:hover { transform: none; filter: none; box-shadow: none; }
+.ready-split .ready-button:active { transform: none; box-shadow: none; }
+.ready-split .ready-button:first-child { border-radius: 999px 0 0 999px; padding-right: 14px; }
+.ready-split .ready-caret { border-radius: 0 999px 999px 0; padding: 13px 18px 13px 8px; color: rgba(251, 241, 227, .82); }
+.ready-split .ready-caret:hover, .ready-split .ready-caret.is-open { color: #fbf1e3; background: rgba(0, 0, 0, .12); }
+.ready-split .ready-caret svg { width: 16px; height: 16px; margin: 0; transition: transform .18s ease; }
+.ready-split .ready-caret.is-open svg { transform: rotate(180deg); }
+.ready-menu { position: absolute; top: calc(100% + 8px); right: 0; z-index: 2; display: grid; gap: 2px; min-width: 164px; padding: 6px; border: 1px solid rgba(91, 69, 44, .35); border-radius: 10px; background: #f7f0e3; box-shadow: 0 12px 30px rgba(22, 17, 12, .3); animation: outcome-fade .16s ease-out both; }
+.ready-menu button { padding: 9px 12px; border: 0; border-radius: 7px; background: transparent; color: var(--ink); text-align: left; cursor: pointer; font: 14px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; white-space: nowrap; }
+.ready-menu button:hover { color: var(--red); background: rgba(166, 43, 37, .08); }
+@media (max-width: 520px) {
+  .ready-split .ready-button:first-child { padding-right: 12px; }
+  .ready-split .ready-caret { padding: 11px 15px 11px 6px; }
+}
+.edit-palette { display: flex; align-items: center; gap: 6px; width: 94%; margin: 12px auto 0; flex-wrap: wrap; }
+.edit-palette-top { margin: 0 auto 14px; }
+.edit-palette .player-mark { margin-right: 4px; }
+.edit-piece { display: grid; justify-items: center; gap: 2px; padding: 3px 4px 2px; border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; transition: background .16s, border-color .16s; }
+.edit-piece i { font-family: var(--font-brush); font-style: normal; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; border: 1px solid; font-weight: 700; font-size: 18px; box-shadow: 0 2px 5px rgba(40, 30, 16, .25); }
+.edit-red i { color: var(--red); background: #f8ead5; border-color: var(--red); }
+.edit-black i { color: #eee5d7; background: #34322f; border-color: #34322f; }
+.edit-piece small { font: 10px/1 ui-monospace, monospace; color: var(--muted); }
+.edit-piece:hover:not(:disabled) { background: var(--workspace-inset); }
+.edit-piece.active { border-color: var(--red); background: rgba(166, 43, 37, .08); }
+.edit-piece:disabled { opacity: .35; cursor: not-allowed; }
+.edit-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: 94%; margin: 10px auto 8px; }
+.edit-turn { min-width: 150px; }
+.edit-spacer { flex: 1; }
+.edit-tool { padding: 6px 10px; border: 1px solid rgba(91, 69, 44, .3); border-radius: 999px; background: transparent; color: var(--muted); cursor: pointer; font: 13px/1 ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; }
+.edit-tool:hover { color: var(--red); border-color: rgba(166,43,37,.4); }
+.edit-tool.active { color: var(--red); border-color: var(--red); background: rgba(166, 43, 37, .08); }
+.edit-done { padding: 7px 18px; border: 0; border-radius: 999px; background: linear-gradient(180deg, #b8372f, #962520); color: #fbf1e3; cursor: pointer; font-size: 14px; letter-spacing: .14em; font-weight: 600; box-shadow: 0 4px 12px rgba(150, 37, 32, .35); }
+.edit-done:hover { filter: brightness(1.06); }
+@media (max-width: 520px) {
+  .edit-piece i { width: 30px; height: 30px; font-size: 16px; }
+  .edit-turn { min-width: 150px; }
+}

@@ -57,7 +57,7 @@ export function positionKey(board: Board, turn: Side): string {
 }
 
 const inBoard = (r: number, c: number) => r >= 0 && r < ROWS && c >= 0 && c < COLS;
-const inPalace = (r: number, c: number, side: Side) =>
+export const inPalace = (r: number, c: number, side: Side) =>
   c >= 3 && c <= 5 && (side === 'red' ? r >= 7 : r <= 2);
 const sameSide = (p: Piece | null, q: Piece | null) => !!p && !!q && p.side === q.side;
 
@@ -364,6 +364,8 @@ export interface AiOptions {
   history?: AdjudicationMove[];
   side?: Side;
   timeMs?: number;
+  /** 自定义开局时的起始局面；history 从它开始计。缺省为标准开局。 */
+  start?: { board: Board; turn: Side };
   onProgress?: (progress: AiSearchProgress) => void;
 }
 
@@ -889,7 +891,9 @@ export function aiBestMove(board: Board, options: AiOptions = {}): [number, numb
     0,
     lastOwn?.to,
   );
-  const initialKey = positionKey(initialBoard(), "red");
+  const initialKey = options.start
+    ? positionKey(options.start.board, options.start.turn)
+    : positionKey(initialBoard(), "red");
   const adjudications = new Map<AiMove, ReturnType<typeof repetitionAdjudication>>();
   const rootMoves = generated.filter((move) => {
     makeMove(board, move);

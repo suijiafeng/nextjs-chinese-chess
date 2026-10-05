@@ -17,8 +17,8 @@ export const AI_LEVEL_LABEL: Record<AiLevel, string> = {
 export const AI_LEVEL_NOTE: Record<AiLevel, string> = {
   beginner: "2 层搜索 · 常走随手棋 · 刚学规则也能赢",
   standard: "4 层搜索 · 偶有失误 · 业余爱好者",
-  hard: "7 层搜索 · 很少失误 · 需要认真应对",
-  master: "12 层搜索 · 不犯错 · 地方高手",
+  hard: "6 层搜索 · 很少失误 · 需要认真应对",
+  master: "9 层搜索 · 不犯错 · 地方高手",
   grandmaster: "全力 10 秒 · 远超人类",
 };
 
@@ -38,8 +38,8 @@ export interface LevelPlan {
 export const LEVEL_PLAN: Record<AiLevel, LevelPlan> = {
   beginner: { depth: 2, multipv: 8, window: 300, temperature: 160, fallback: "beginner" },
   standard: { depth: 4, multipv: 5, window: 150, temperature: 70, fallback: "standard" },
-  hard: { depth: 7, multipv: 3, window: 60, temperature: 28, fallback: "hard" },
-  master: { depth: 12, multipv: 1, window: 0, temperature: 1, fallback: "hard" },
+  hard: { depth: 6, multipv: 3, window: 60, temperature: 28, fallback: "hard" },
+  master: { depth: 9, multipv: 1, window: 0, temperature: 1, fallback: "hard" },
   grandmaster: { multipv: 1, window: 0, temperature: 1, fallback: "hard" },
 };
 
@@ -247,6 +247,7 @@ export async function analyzeAtLevel(
       }),
       signal,
       searchOptions.history,
+      searchOptions.start,
     );
     if (deterministic || !plan.depth) return result.best;
     return pickCandidate(result.candidates, plan) ?? result.best;
