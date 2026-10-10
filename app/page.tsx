@@ -120,7 +120,7 @@ export default function Home() {
   const [shaking, setShaking] = useState<Coord | null>(null);
   const [resignConfirm, setResignConfirm] = useState(false);
   const [restored, setRestored] = useState(false);
-  /** 点击棋盘上的「开始」后才计时、才让电脑走子。 */
+  /** 首次有效落子启动计时；电脑先行的新局直接启动。 */
   const [started, setStarted] = useState(false);
   const [boardFullscreen, setBoardFullscreen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -136,23 +136,68 @@ export default function Home() {
   const [brush, setBrush] = useState<Piece | "erase" | null>(null);
   const [editPick, setEditPick] = useState<Coord | null>(null);
   const [editNotice, setEditNotice] = useState<string | null>(null);
-  /** 开局卡片上「开始对局」旁的下拉菜单。 */
-  const [readyMenuOpen, setReadyMenuOpen] = useState(false);
-  const readyMenuRef = useRef<HTMLDivElement | null>(null);
+  const [newGameOpen, setNewGameOpen] = useState(false);
+  const [newGameConfirm, setNewGameConfirm] = useState(false);
+  const [draftMode, setDraftMode] = useState<GameMode>("ai");
+  const [draftSide, setDraftSide] = useState<Side>("red");
+  const [draftDifficulty, setDraftDifficulty] = useState<AiLevel>("standard");
+  const [leaveConfirm, setLeaveConfirm] = useState(false);
+  const moreRef = useRef<HTMLDetailsElement | null>(null);
+  const hintRequestRef = useRef(0);
+  const hintAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    if (!readyMenuOpen) return;
-    const close = (event: PointerEvent) => {
-      if (!readyMenuRef.current?.contains(event.target as Node)) setReadyMenuOpen(false);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setNewGameOpen(false);
+      setNewGameConfirm(false);
+      setLeaveConfirm(false);
+      setResignConfirm(false);
+      setDrawerOpen(false);
+      hintRequestRef.current++;
+      hintAbortRef.current?.abort();
+      hintAbortRef.current = null;
+      setHintThinking(false);
+      if (moreRef.current) moreRef.current.open = false;
     };
-    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") setReadyMenuOpen(false); };
-    document.addEventListener("pointerdown", close);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", close);
-      document.removeEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    if (!newGameOpen && !resignConfirm && !leaveConfirm) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = document.querySelector<HTMLElement>("[data-game-dialog]");
+    const frame = window.requestAnimationFrame(() => dialog?.querySelector<HTMLElement>("[data-cancel]")?.focus());
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !dialog) return;
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>("button:not(:disabled), input:not(:disabled), [tabindex='0']"));
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (!first || !last) return;
+      if (!dialog.contains(document.activeElement) || (event.shiftKey && document.activeElement === first)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-  }, [readyMenuOpen]);
+    document.addEventListener("keydown", trapFocus);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", trapFocus);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [newGameOpen, newGameConfirm, resignConfirm, leaveConfirm]);
+
+  useEffect(() => {
+    const closeMore = (event: PointerEvent) => {
+      if (moreRef.current && !moreRef.current.contains(event.target as Node)) moreRef.current.open = false;
+    };
+    document.addEventListener("pointerdown", closeMore);
+    return () => document.removeEventListener("pointerdown", closeMore);
+  }, []);
+
   const [lanHost, setLanHost] = useState("localhost");
   const [joinCode, setJoinCode] = useState("");
   const [linkCopied, setLinkCopied] = useState(false);
@@ -169,8 +214,6 @@ export default function Home() {
   const exitFullscreenRef = useRef<HTMLButtonElement>(null);
   const boardStageRef = useRef<HTMLDivElement>(null);
   const gameLayoutRef = useRef<HTMLElement>(null);
-  const hintRequestRef = useRef(0);
-  const hintAbortRef = useRef<AbortController | null>(null);
   const timesRef = useRef(times);
 
   useEffect(() => {
@@ -251,7 +294,7 @@ export default function Home() {
             setTurn(data.turn === "black" ? "black" : "red");
             const savedHistory = Array.isArray(data.history) ? data.history : [];
             setHistory(savedHistory);
-            setStarted(savedHistory.length > 0 || !!data.result);
+            setStarted(savedHistory.length > 0 || !!data.result || (data.mode === "ai" && (data.startTurn ?? "red") !== (data.playerSide ?? "red")));
             const savedTimes = data.times ?? { red: 900, black: 900 };
             setTimes(savedTimes);
             timesRef.current = savedTimes;
@@ -508,7 +551,6 @@ export default function Home() {
     setBoard(initialBoard());
     setTurn("red");
     setEditing(false);
-    setReadyMenuOpen(false);
     setSelected(null);
     setTargets([]);
     setHistory([]);
@@ -523,7 +565,7 @@ export default function Home() {
     setReviewPly(null);
     movingQueueRef.current = [];
     setMoving(null);
-    setStarted(false);
+    setStarted(nextMode === "ai" && nextSide === "black");
     if (nextMode !== "online" && lanRef.current?.current) lanRef.current.leave();
     if (nextMode !== "online") setLan(LAN_IDLE);
   }, [customStart, mode, playerSide]);
@@ -586,11 +628,29 @@ export default function Home() {
     setLan(LAN_IDLE);
   };
 
-  const beginGame = () => {
-    if (started) return;
-    setReadyMenuOpen(false);
-    setStarted(true);
-    playSound("start", { side: null });
+  const openNewGame = () => {
+    setDraftMode(mode);
+    setDraftSide(playerSide);
+    setDraftDifficulty("standard");
+    setNewGameConfirm(false);
+    setNewGameOpen(true);
+    if (moreRef.current) moreRef.current.open = false;
+  };
+
+  const submitNewGame = () => {
+    if (!newGameConfirm && ((started && !result) || editing || lan.status !== "idle")) {
+      setNewGameConfirm(true);
+      return;
+    }
+    if (draftMode === "online") {
+      lanRef.current?.leave();
+      setLan(LAN_IDLE);
+    }
+    setAiDifficulty(draftDifficulty);
+    startNewGame(draftMode, draftSide);
+    setNewGameOpen(false);
+    setNewGameConfirm(false);
+    setDrawerOpen(false);
   };
 
   const handleMoveDone = useCallback(() => {
@@ -876,6 +936,7 @@ export default function Home() {
     setMoving(null);
     setLanding(null);
     setEditing(false);
+    setStarted(mode === "ai" && nextTurn === aiSide);
   };
 
   const finishEditing = () => {
@@ -889,13 +950,18 @@ export default function Home() {
   };
 
   const choosePoint = useCallback((r: number, c: number) => {
-    if (!started || result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
-    if (mode === "online" && (turn !== lan.side || !lan.connected || lan.pendingUndo)) return;
+    if (!restored || editing || newGameOpen || resignConfirm || leaveConfirm || engineError || result || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
+    if (mode === "online" && (!started || turn !== lan.side || !lan.connected || lan.pendingUndo)) return;
     const piece = board[r][c];
 
     if (selected && targets.some(([tr, tc]) => tr === r && tc === c)) {
       const from = selected;
-      if (commitMove(from, [r, c]) && mode === "online") lanRef.current?.move(from, [r, c]);
+      if (commitMove(from, [r, c])) {
+        if (!started) {
+          setStarted(true);
+        }
+        if (mode === "online") lanRef.current?.move(from, [r, c]);
+      }
       return;
     }
 
@@ -907,7 +973,7 @@ export default function Home() {
       // 点了不能走的位置：棋子抖一下，保持选中，避免玩家以为没反应。
       shake(selected);
     }
-  }, [aiSide, aiThinking, board, commitMove, lan.connected, lan.pendingUndo, lan.side, playSound, hintThinking, mode, result, reviewing, selected, shake, started, targets, turn]);
+  }, [restored, editing, newGameOpen, resignConfirm, leaveConfirm, engineError, aiSide, aiThinking, board, commitMove, lan.connected, lan.pendingUndo, lan.side, playSound, hintThinking, mode, result, reviewing, selected, shake, started, targets, turn]);
 
   const canUndo = mode === "online"
     ? started && !result && !lan.pendingUndo && history.some((record) => record.mover.side === lan.side)
@@ -993,7 +1059,7 @@ export default function Home() {
   };
 
   const requestHint = () => {
-    if (!started || result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
+    if (mode === "online" || !started || result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
     hintAbortRef.current?.abort();
     const controller = new AbortController();
     hintAbortRef.current = controller;
@@ -1013,7 +1079,10 @@ export default function Home() {
           deterministic: true,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
-        if (!move) return;
+        if (!move) {
+          setRuleNotice("当前局面没有可推荐的合法着法。");
+          return;
+        }
         if (isBannedMove({ board, turn, history, result: null, initialKey: startKey }, [move[0], move[1]], [move[2], move[3]])) {
           const safe = await analyzeAtLevel(board, "hard", {
             history,
@@ -1022,18 +1091,23 @@ export default function Home() {
             start: startRef.current,
             forceBuiltin: true,
           }, 800, undefined, undefined, controller.signal);
-          if (hintRequestRef.current !== requestId || !safe) return;
+          if (hintRequestRef.current !== requestId) return;
+          if (!safe || isBannedMove({ board, turn, history, result: null, initialKey: startKey }, [safe[0], safe[1]], [safe[2], safe[3]])) {
+            setRuleNotice("暂时没有找到符合行棋规则的推荐着法，请重试。");
+            return;
+          }
           move = safe;
         }
         const from: Coord = [move[0], move[1]];
         const to: Coord = [move[2], move[3]];
         const piece = board[from[0]][from[1]];
         if (piece) setHint({ from, to, notation: moveNotation(piece, from, to) });
+        else setRuleNotice("推荐着法未能生成，请重试。");
       } catch (error) {
         if (hintRequestRef.current !== requestId || isAbortError(error)) return;
         console.warn("推荐着法分析失败", error);
         setHint(null);
-        setRuleNotice("提示分析暂时不可用，请稍后再试");
+        setRuleNotice("提示分析暂时不可用，请稍后再试。");
       } finally {
         if (hintRequestRef.current === requestId) {
           hintAbortRef.current = null;
@@ -1080,6 +1154,11 @@ export default function Home() {
     const active = turn === side && !result && !engineError && !reviewing;
     const isAi = mode === "ai" && side === aiSide;
     const thinking = active && aiThinking && isAi;
+    const clockRunning = active && started && !hintThinking;
+    const clockUrgent = clockRunning && times[side] > 0 && times[side] <= 10;
+    const clockClass = clockRunning
+      ? `active-clock${times[side] <= 60 ? " low-clock" : ""}${clockUrgent ? " urgent-clock" : ""}`
+      : "";
     const isMe = mode === "online" && side === lan.side;
     const isRemote = mode === "online" && !isMe;
     const name = mode === "online"
@@ -1102,7 +1181,7 @@ export default function Home() {
           <b>{name}{thinking ? <span className="thinking-inline">思考中<span className="status-loading" aria-hidden="true"><i /><i /><i /></span></span> : null}</b>
           <small className={thinking ? "thinking-note" : undefined}>{note}</small>
         </span>
-        <time className={active ? "active-clock" : ""}>{formatTime(times[side])}</time>
+        <span className="clock-copy"><small>剩余</small><time key={clockUrgent ? times[side] : "steady"} className={clockClass}>{formatTime(times[side])}</time></span>
       </div>
     );
   };
@@ -1148,21 +1227,23 @@ export default function Home() {
     </div>
   );
 
-  const renderControls = (extraClass = "") => (
-    <div className={`control-row${extraClass ? ` ${extraClass}` : ""}`}>
-            <button type="button" onClick={requestHint} disabled={mode === "online" || !started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)} aria-label="推荐着法">◇ <span>{hintThinking ? "分析" : "提示"}</span></button>
-            <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing} aria-label="悔棋">↶ <span>悔棋</span></button>
-            <button type="button" onClick={() => setFlipped((current) => !current)} aria-label="翻转棋盘">⇅ <span>翻转</span></button>
-            <button
-              type="button"
-              onClick={resign}
-              disabled={!started || !!result || !!engineError || reviewing}
-              aria-label="认输"
-            >⚑ <span>认输</span></button>
-            {mode === "online"
-              ? <button type="button" onClick={lanLeave} disabled={lan.status === "idle"} aria-label="离开房间">⇠ <span>离开</span></button>
-              : <button type="button" onClick={() => startNewGame()} aria-label="重新开局">↻ <span>重开</span></button>}
-          </div>
+  const renderControls = () => (
+    <div className="control-row board-tools" role="group" aria-label="对局工具">
+      <button type="button" onClick={requestHint} disabled={mode === "online" || !started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)}><i aria-hidden="true">◇</i><span>{hintThinking ? "分析中" : "提示"}</span></button>
+      <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing}><i aria-hidden="true">↶</i><span>悔棋</span></button>
+      <button type="button" className={drawerOpen ? "is-active" : undefined} onClick={() => { setDrawerOpen((open) => !open); if (moreRef.current) moreRef.current.open = false; }} aria-controls="side-panel" aria-expanded={drawerOpen}><i aria-hidden="true">≡</i><span>棋谱</span></button>
+      <button type="button" className="desktop-flip" onClick={() => setFlipped((current) => !current)}><i aria-hidden="true">⇅</i><span>翻转</span></button>
+      <details className="more-tools" ref={moreRef}>
+        <summary><i aria-hidden="true">⋯</i><span>更多</span></summary>
+        <div className="more-menu">
+          <button type="button" className="mobile-flip" onClick={() => { setFlipped((current) => !current); if (moreRef.current) moreRef.current.open = false; }}>翻转棋盘</button>
+          {!started && !result && !history.length && mode !== "online" ? <button type="button" onClick={() => { openEditor(); if (moreRef.current) moreRef.current.open = false; }}>编辑开局</button> : null}
+          <button type="button" onClick={openNewGame}>新对局…</button>
+          <button type="button" className="danger-action" onClick={() => { resign(); if (moreRef.current) moreRef.current.open = false; }} disabled={!started || !!result || !!engineError || reviewing}>认输…</button>
+          {mode === "online" ? <button type="button" className="danger-action" onClick={() => { setLeaveConfirm(true); if (moreRef.current) moreRef.current.open = false; }} disabled={lan.status === "idle"}>离开房间…</button> : null}
+        </div>
+      </details>
+    </div>
   );
 
   const lanWaiting = mode === "online" && lan.status !== "playing" && !(started && lan.code);
@@ -1204,7 +1285,7 @@ export default function Home() {
     ? lan.pendingUndo === lan.side ? "对方同意后将撤回你的最后一手" : "同意后将撤回对方的最后一手"
     : lanWaiting && !ruleNotice
     ? lan.status === "idle" ? "创建房间或输入房间码加入" : lan.status === "joining" ? (hasFixedServer() ? "正在连接服务器…" : "正在连接局域网服务…") : `房间码 ${lan.code}，等待对方加入`
-    : !started && !result ? "点击棋盘上的「开始」进入对局" : engineError ?? ruleNotice ?? (reviewing
+    : !started && !result ? "落下第一子开始对局" : engineError ?? ruleNotice ?? (reviewing
     ? visiblePly === history.length ? "已到达当前局面" : "可用下方按钮或着法记录逐步查看"
     : result?.message
     ?? (aiThinking
@@ -1213,9 +1294,7 @@ export default function Home() {
         : "请稍候，对手正在推演棋路"
       : hintThinking
         ? `${AI_LEVEL_LABEL[aiDifficulty]}棋力正在寻找推荐着法`
-        : hint
-          ? `建议 ${hint.notation}，棋盘已标出起点与落点`
-          : selected ? `可走 ${targets.length} 处` : "请选择一枚棋子"));
+        : selected ? `可走 ${targets.length} 处` : "请选择一枚棋子"));
   const lostToComputer = (mode === "ai" && result?.winner === aiSide) || (mode === "online" && !!result?.winner && result.winner !== lan.side);
   const isDraw = !!result && !result.winner;
   const outcomeTitle = isDraw
@@ -1243,6 +1322,7 @@ export default function Home() {
           <span><strong>长安棋社</strong><small>CHANG&apos;AN XIANGQI</small></span>
         </a>
         <div className="top-actions">
+          <button type="button" className="new-game-button" disabled={!restored} onClick={openNewGame}>新对局</button>
           <button ref={fullscreenButtonRef} className="icon-button fullscreen-button" type="button" aria-label="对局全屏" title="对局全屏" disabled={!restored} onClick={enterBoardFullscreen}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M8 21H3v-5" /></svg>
           </button>
@@ -1259,7 +1339,7 @@ export default function Home() {
         <div className="board-column" style={restored ? undefined : { visibility: "hidden" }} aria-busy={!restored}>
           {editing ? renderPalette(topSide, true) : renderPlayer(topSide, true)}
 
-          <div ref={boardStageRef} className="board-stage">
+          <div ref={boardStageRef} className="board-stage" onPointerDown={() => { if (moreRef.current) moreRef.current.open = false; }}>
           <ChessBoard
             board={editing ? editBoard : visibleBoard}
             turn={editing ? editTurn : visibleTurn}
@@ -1327,80 +1407,25 @@ export default function Home() {
                 )}
               </div>
             </div>
-          ) : !started && !result && !reviewing && !editing && mode !== "online" ? (
-            <div className="ready-overlay">
-              <div className="ready-card">
-                <span className="ready-seal" aria-hidden="true">棋</span>
-                <small>
-                  {mode === "ai"
-                    ? `人机对弈 · 你执${playerSide === "red" ? "红" : "黑"} · ${AI_LEVEL_LABEL[aiDifficulty]}`
-                    : "同屏对弈"}
-                  {customStart ? ` · 自定义开局 · ${startTurn === "red" ? "红" : "黑"}方先行` : mode === "ai" ? ` · ${playerSide === "red" ? "先行" : "后行"}` : " · 红方先行"}
-                </small>
-                <div className="ready-split" ref={readyMenuRef}>
-                  <button type="button" className="ready-button" onClick={beginGame} autoFocus>
-                    开始对局
-                  </button>
-                  <button
-                    type="button"
-                    className={`ready-button ready-caret${readyMenuOpen ? " is-open" : ""}`}
-                    aria-haspopup="menu"
-                    aria-expanded={readyMenuOpen}
-                    aria-label="更多开局选项"
-                    onClick={() => setReadyMenuOpen((open) => !open)}
-                  >
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor" /></svg>
-                  </button>
-                  {readyMenuOpen ? (
-                    <div className="ready-menu" role="menu">
-                      <button type="button" role="menuitem" onClick={() => { setReadyMenuOpen(false); openEditor(); }}>编辑开局</button>
-                      {customStart ? (
-                        <button type="button" role="menuitem" onClick={() => { setReadyMenuOpen(false); applyStart(initialBoard(), "red"); }}>恢复标准开局</button>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
           ) : null}
           </div>
 
           {editing ? renderPalette(bottomSide) : renderPlayer(bottomSide)}
-          {editing ? renderEditToolbar() : renderControls("controls-mobile")}
-          <button
-            type="button"
-            className="drawer-toggle"
-            aria-expanded={drawerOpen}
-            aria-controls="side-panel"
-            onClick={() => setDrawerOpen(true)}
-          >
-            <span>☰</span> 设置与着法记录<small>{history.length ? `${history.length} 手` : ""}</small>
-          </button>
+          <div className="game-caption">{mode === "ai" ? `人机对弈 · 你执${playerSide === "red" ? "红" : "黑"} · ${AI_LEVEL_LABEL[aiDifficulty]}` : mode === "local" ? "同屏对弈" : "联网对弈"} · 每方 15 分钟</div>
+          {!started && !result && !editing && mode !== "online" ? <p className="first-move-note">{customStart ? "自定义开局 · " : ""}落下第一子开始对局</p> : null}
+          {(editing || engineError || ruleNotice || reviewing || result || checked || (aiThinking && !pikafishReady) || lan.pendingUndo) ? (
+            <div className="board-notice" role="status" aria-live="polite"><b>{statusTitle}</b><span>{statusNote}</span></div>
+          ) : null}
+          {editing ? renderEditToolbar() : renderControls()}
         </div>
 
         {drawerOpen ? <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} aria-hidden="true" /> : null}
-        <aside className={`side-panel${drawerOpen ? " is-open" : ""}`} id="side-panel">
+        <aside className={`side-panel${drawerOpen ? " is-open" : ""}`} id="side-panel" aria-label="本局棋谱">
           <div className="drawer-head">
-            <span>设置与着法记录</span>
+            <span>本局棋谱</span>
             <button type="button" className="dialog-close" onClick={() => setDrawerOpen(false)} aria-label="收起">✕</button>
           </div>
-          <div className="mode-switch" role="group" aria-label="选择对局模式">
-            <button className={mode === "ai" ? "active" : ""} type="button" onClick={() => startNewGame("ai")}>人机对弈</button>
-            <button className={mode !== "ai" ? "active" : ""} type="button" onClick={() => { if (mode === "ai") startNewGame("local"); }}>双人对弈</button>
-          </div>
-
-          {mode !== "ai" ? (
-            <div className="ai-setup">
-              <div className="setup-row">
-                <span className="setup-label">方式</span>
-                <div className="seg seg-2" role="group" aria-label="选择双人对弈方式">
-                  <button className={mode === "local" ? "active" : ""} type="button" aria-pressed={mode === "local"} title="两人共用这台设备轮流落子" onClick={() => { if (mode !== "local") startNewGame("local"); }}>同屏对弈</button>
-                  <button className={mode === "online" ? "active" : ""} type="button" aria-pressed={mode === "online"} title="两台设备通过局域网对弈" onClick={() => { if (mode !== "online") startNewGame("online"); }}>局域网对弈</button>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
+          <p className="record-help">点击着法逐步复盘，收起棋谱继续下棋</p>
           {lanInGame ? (
             <div className="lan-bar">
               <span>房间 <b>{lan.code}</b></span>
@@ -1410,56 +1435,6 @@ export default function Home() {
               </span>
             </div>
           ) : null}
-
-          {mode === "ai" ? (
-            <div className="ai-setup">
-              <div className="setup-row">
-                <span className="setup-label">执子</span>
-                <div className="seg seg-2" role="group" aria-label="选择执子颜色（切换后重新开局）" title="切换后将重新开局">
-                  {(["red", "black"] as Side[]).map((side) => (
-                    <button
-                      className={`${side}-seg${playerSide === side ? " active" : ""}`}
-                      type="button"
-                      key={side}
-                      aria-pressed={playerSide === side}
-                      onClick={() => { if (side !== playerSide) startNewGame("ai", side); }}
-                    >
-                      <i aria-hidden="true">{side === "red" ? "帥" : "将"}</i>
-                      {side === "red" ? "红先" : "黑后"}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="setup-row">
-                <span className="setup-label">棋力</span>
-                <div className="seg seg-5" role="group" aria-label="选择电脑难度" title={AI_LEVEL_NOTE[aiDifficulty]}>
-                  {(Object.keys(AI_LEVEL_LABEL) as AiLevel[]).map((level) => (
-                    <button
-                      className={aiDifficulty === level ? "active" : ""}
-                      type="button"
-                      key={level}
-                      aria-pressed={aiDifficulty === level}
-                      title={AI_LEVEL_NOTE[level]}
-                      onClick={() => {
-                        setAiDifficulty(level);
-                        setHint(null);
-                      }}
-                    >
-                      {AI_LEVEL_LABEL[level]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          <div className={`board-status${result ? " game-over" : ""}${ruleNotice || (editing && editNotice) ? " rule-limited" : ""}`} role="status" aria-live="polite">
-            <span className={`mini-piece ${(editing ? editTurn : turn) === "black" ? "black-mini" : ""}`}>{(editing ? editTurn : turn) === "red" ? "帥" : "将"}</span>
-            <b>{statusTitle}{statusLoading ? <span className="status-loading" aria-hidden="true"><i /><i /><i /></span> : null}</b>
-            <small>{statusNote}</small>
-          </div>
-
-          {renderControls("controls-desktop")}
 
           <div className="record-card">
             <div className="section-heading"><span>着法记录</span><small>{reviewing ? `${visiblePly} / ${history.length} 手` : `${history.length} 手`}</small></div>
@@ -1493,16 +1468,16 @@ export default function Home() {
             )}
 
             {(
-              <div className="capture-summary">
+              <details className="capture-details"><summary>查看子力与俘获</summary><div className="capture-summary">
                 <div className="material-balance">
                   <small>子力对比</small>
                   <span className={materialDiff > 0 ? "balance-red" : materialDiff < 0 ? "balance-black" : ""}>
-                    {materialDiff === 0 ? "势均力敌" : materialDiff > 0 ? `红方 +${materialDiff}` : `黑方 +${-materialDiff}`}
+                    {materialDiff === 0 ? "子力持平" : materialDiff > 0 ? `红方 +${materialDiff}` : `黑方 +${-materialDiff}`}
                   </span>
                 </div>
                 <div className="red-captures"><small>红方俘获</small><span>{capturedByRed.length ? capturedByRed.map((item, index) => <i className="captured-black" key={index}>{NAMES.black[item.captured!.t]}</i>) : <em>—</em>}</span></div>
                 <div className="black-captures"><small>黑方俘获</small><span>{capturedByBlack.length ? capturedByBlack.map((item, index) => <i className="captured-red" key={index}>{NAMES.red[item.captured!.t]}</i>) : <em>—</em>}</span></div>
-              </div>
+              </div></details>
             )}
           </div>
         </aside>
@@ -1523,7 +1498,7 @@ export default function Home() {
             <div className="outcome-actions">
               {mode === "online"
                 ? <button type="button" onClick={() => lanRef.current?.rematch()} disabled={lan.rematch.includes(lan.side)} autoFocus>{lan.rematch.includes(lan.side) ? "等待对方同意…" : lan.rematch.length ? "对方想再来一局 · 同意" : "再来一局"}</button>
-                : <button type="button" onClick={() => startNewGame()} autoFocus>再来一局</button>}
+                : <button type="button" onClick={() => { startNewGame(); setDrawerOpen(false); }} autoFocus>再来一局</button>}
               <button type="button" onClick={() => reviewTo(history.length)}>复盘棋局</button>
             </div>
           </div>
@@ -1544,8 +1519,95 @@ export default function Home() {
         </div>
       ) : null}
 
+      {newGameOpen ? (
+        <div className="confirm-overlay" data-game-dialog role="dialog" aria-modal="true" aria-labelledby="new-game-title">
+          <div className="confirm-card new-game-card">
+            <button type="button" className="dialog-close" onClick={() => setNewGameOpen(false)} aria-label="关闭">✕</button>
+            <h2 id="new-game-title">{newGameConfirm ? "放弃当前对局？" : "新对局"}</h2>
+            {newGameConfirm ? <p>当前棋局和着法记录将被清空{mode === "online" ? "，并离开当前房间" : ""}。确定按刚才的设置开始新局？</p> : <>
+          <div className="mode-switch" role="group" aria-label="选择对局模式">
+            <button className={draftMode === "ai" ? "active" : ""} type="button" onClick={() => setDraftMode("ai")}>人机对弈</button>
+            <button className={draftMode !== "ai" ? "active" : ""} type="button" onClick={() => setDraftMode("local")}>双人对弈</button>
+          </div>
+
+          {draftMode !== "ai" ? (
+            <div className="ai-setup">
+              <div className="setup-row">
+                <span className="setup-label">方式</span>
+                <div className="seg seg-2" role="group" aria-label="选择双人对弈方式">
+                  <button className={draftMode === "local" ? "active" : ""} type="button" aria-pressed={draftMode === "local"} title="两人共用这台设备轮流落子" onClick={() => { if (draftMode !== "local") setDraftMode("local"); }}>同屏对弈</button>
+                  <button className={draftMode === "online" ? "active" : ""} type="button" aria-pressed={draftMode === "online"} title="两台设备通过局域网对弈" onClick={() => { if (draftMode !== "online") setDraftMode("online"); }}>局域网对弈</button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {draftMode === "ai" ? (
+            <div className="ai-setup">
+              <div className="setup-row">
+                <span className="setup-label">执子</span>
+                <div className="seg seg-2" role="group" aria-label="选择新局执子颜色" >
+                  {(["red", "black"] as Side[]).map((side) => (
+                    <button
+                      className={`${side}-seg${draftSide === side ? " active" : ""}`}
+                      type="button"
+                      key={side}
+                      aria-pressed={draftSide === side}
+                      onClick={() => { setDraftSide(side); }}
+                    >
+                      <i aria-hidden="true">{side === "red" ? "帥" : "将"}</i>
+                      {side === "red" ? "红先" : "黑后"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="setup-row">
+                <span className="setup-label">棋力</span>
+                <div className="seg seg-5" role="group" aria-label="选择电脑难度" title={AI_LEVEL_NOTE[draftDifficulty]}>
+                  {(Object.keys(AI_LEVEL_LABEL) as AiLevel[]).map((level) => (
+                    <button
+                      className={draftDifficulty === level ? "active" : ""}
+                      type="button"
+                      key={level}
+                      aria-pressed={draftDifficulty === level}
+                      title={AI_LEVEL_NOTE[level]}
+                      onClick={() => {
+                        setDraftDifficulty(level);
+                      }}
+                    >
+                      {AI_LEVEL_LABEL[level]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+
+              <p className="setup-note">每方 15 分钟 · 配置仅在开始新局后生效</p>
+            </>}
+            <div className="confirm-actions">
+              <button type="button" onClick={submitNewGame}>{newGameConfirm ? "放弃并开始新局" : draftMode === "online" ? "进入房间大厅" : "开始新局"}</button>
+              <button type="button" data-cancel autoFocus onClick={() => { setNewGameOpen(false); setNewGameConfirm(false); }}>返回棋盘</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {leaveConfirm ? (
+        <div className="confirm-overlay" data-game-dialog role="dialog" aria-modal="true" aria-labelledby="leave-title">
+          <div className="confirm-card">
+            <h2 id="leave-title">离开当前房间？</h2>
+            <p>你将退出房间，当前棋局和着法记录将被清空。</p>
+            <div className="confirm-actions">
+              <button type="button" onClick={() => { lanLeave(); setLeaveConfirm(false); }}>确定离开</button>
+              <button type="button" data-cancel autoFocus onClick={() => setLeaveConfirm(false)}>继续对局</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {resignConfirm ? (
-        <div className="confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="resign-title">
+        <div className="confirm-overlay" data-game-dialog role="dialog" aria-modal="true" aria-labelledby="resign-title">
           <div className="confirm-card">
             <button type="button" className="dialog-close" onClick={() => setResignConfirm(false)} aria-label="关闭">✕</button>
             <div className="confirm-seal" aria-hidden="true"><span>認</span></div>
@@ -1554,8 +1616,8 @@ export default function Home() {
               ? `认输将判对方取胜，且不可撤销。`
               : `当前轮到${turn === "red" ? "红方" : "黑方"}行棋，认输将判${turn === "red" ? "黑方" : "红方"}取胜，且不可撤销。`}</p>
             <div className="confirm-actions">
-              <button type="button" onClick={confirmResign} autoFocus>确定认输</button>
-              <button type="button" onClick={() => setResignConfirm(false)}>继续对局</button>
+              <button type="button" onClick={confirmResign}>确定认输</button>
+              <button type="button" data-cancel autoFocus onClick={() => setResignConfirm(false)}>继续对局</button>
             </div>
           </div>
         </div>
