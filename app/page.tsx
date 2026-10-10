@@ -631,7 +631,7 @@ export default function Home() {
   const openNewGame = () => {
     setDraftMode(mode);
     setDraftSide(playerSide);
-    setDraftDifficulty("standard");
+    setDraftDifficulty(aiDifficulty);
     setNewGameConfirm(false);
     setNewGameOpen(true);
     if (moreRef.current) moreRef.current.open = false;
@@ -1059,7 +1059,7 @@ export default function Home() {
   };
 
   const requestHint = () => {
-    if (mode === "online" || !started || result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
+    if (mode === "online" || !restored || result || engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)) return;
     hintAbortRef.current?.abort();
     const controller = new AbortController();
     hintAbortRef.current = controller;
@@ -1229,7 +1229,7 @@ export default function Home() {
 
   const renderControls = () => (
     <div className="control-row board-tools" role="group" aria-label="对局工具">
-      <button type="button" onClick={requestHint} disabled={mode === "online" || !started || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)}><i aria-hidden="true">◇</i><span>{hintThinking ? "分析中" : "提示"}</span></button>
+      <button type="button" onClick={requestHint} disabled={mode === "online" || !restored || !!result || !!engineError || reviewing || aiThinking || hintThinking || (mode === "ai" && turn === aiSide)}><i aria-hidden="true">◇</i><span>{hintThinking ? "分析中" : "提示"}</span></button>
       <button type="button" onClick={undo} disabled={!canUndo || aiThinking || hintThinking || reviewing}><i aria-hidden="true">↶</i><span>悔棋</span></button>
       <button type="button" className={drawerOpen ? "is-active" : undefined} onClick={() => { setDrawerOpen((open) => !open); if (moreRef.current) moreRef.current.open = false; }} aria-controls="side-panel" aria-expanded={drawerOpen}><i aria-hidden="true">≡</i><span>棋谱</span></button>
       <button type="button" className="desktop-flip" onClick={() => setFlipped((current) => !current)}><i aria-hidden="true">⇅</i><span>翻转</span></button>

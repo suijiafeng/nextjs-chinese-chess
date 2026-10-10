@@ -1006,7 +1006,8 @@ footer b { padding-left: 12px; border-left: 1px solid rgba(84,72,54,.14); color:
   --workspace-inset: #f0ebe2;
   position: absolute;
   top: 60px;
-  left: calc(100% + 16px);
+  /* 与棋谱面板同样的溢出保护：窄桌面下不贴边、不溢出视口。 */
+  left: min(calc(100% + 16px), calc(50% + 50vw - 92px));
   z-index: 42;
   display: flex;
   flex-direction: column;
