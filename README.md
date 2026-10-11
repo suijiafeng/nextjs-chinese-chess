@@ -22,9 +22,9 @@
 
 ## 界面预览
 
-![长安棋社桌面端对局界面](./public/screenshots/game-desktop.png)
+![Snipaste_chess 截图](./public/screenshots/Snipaste_chess.png)
 
-> 桌面端实际对局界面：棋盘、棋力选择、本局状态与着法记录保持在同一视野内。
+> 经典中式棋社风格截图：棋盘、状态栏与对局场景一览无遗，便于快速理解产品界面与落子体验。
 
 ## 功能亮点
 
