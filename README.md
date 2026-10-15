@@ -176,10 +176,6 @@ npm run lint
 npm run build
 ```
 
----
-
-<p align="center"><strong>代码工匠 · 用代码打磨每一步</strong></p>
-
 
 ## 局域网对弈
 
@@ -205,6 +201,7 @@ npm run dev:lan
 
 房间只存在内存里，重启服务会清空。
 
+
 ## 部署到线上
 
 中转服务是一个常驻的 Node 进程，需要放在能长时间运行进程的服务器上（无服务器平台跑不了）：
@@ -223,3 +220,5 @@ NEXT_PUBLIC_WS_URL=wss://ws.example.com
 
 ---
 > **声明**：本仓库为个人项目，仅供学习交流。
+
+<p align="center"><strong>代码工匠 · 用代码打磨每一步</strong></p>
