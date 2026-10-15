@@ -14,6 +14,7 @@ type EngineMessage =
   | { type: "INFO"; info?: PikafishProgress }
   | { type: "PV"; depth?: number; multipv?: number; score?: number; mate?: number; pv?: string[] }
   | { type: "BEST_MOVE"; move?: string }
+  | { type: "NNUE_PROGRESS"; loaded: number; total: number }
   | { type: "ERROR"; message?: string };
 
 /** 一条候选着法：分数以行棋方视角计，正数对行棋方有利；mate 为正表示行棋方将在 N 步内将死对方。 */
@@ -50,6 +51,13 @@ const PIECE_FEN: Record<PieceType, string> = {
 
 let engineWorker: Worker | null = null;
 let engineReady: Promise<void> | null = null;
+/** NNUE 下载进度回调：引擎首次加载触发下载时由 worker 上报，仅触发一次。 */
+let nnueProgressHandler: ((loaded: number, total: number) => void) | null = null;
+
+/** 注册 NNUE 下载进度回调；传 null 清除。 */
+export function setNnueDownloadProgressHandler(handler: ((loaded: number, total: number) => void) | null) {
+  nnueProgressHandler = handler;
+}
 let resolveReady: (() => void) | null = null;
 let rejectReady: ((error: Error) => void) | null = null;
 let engineLoadingTimeout: number | null = null;
@@ -173,6 +181,10 @@ function ensureEngine() {
           mate: data.mate,
           depth: data.depth ?? 0,
         });
+        return;
+      }
+      if (data.type === "NNUE_PROGRESS") {
+        nnueProgressHandler?.(data.loaded, data.total);
         return;
       }
       if (data.type === "ERROR") {

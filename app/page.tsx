@@ -108,6 +108,8 @@ export default function Home() {
   const [musicVolume, setMusicVolumeState] = useState(0.6);
   const [aiThinking, setAiThinking] = useState(false);
   const [hintThinking, setHintThinking] = useState(false);
+  /** NNUE 下载进度（仅大师/宗师首次加载时出现） */
+  const [nnueDownload, setNnueDownload] = useState<{ loaded: number; total: number } | null>(null);
   const [hint, setHint] = useState<HintMove | null>(null);
   const [result, setResult] = useState<GameResult | null>(null);
   const [engineError, setEngineError] = useState<string | null>(null);
@@ -790,6 +792,8 @@ export default function Home() {
           side: aiSide,
           timeMs: searchBudget,
           start: startRef.current,
+          onNnueDownloadProgress: (loaded, total) =>
+            setNnueDownload(total > 0 && loaded < total ? { loaded, total } : null),
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (cancelled) return;
         let chosen = move;
@@ -813,7 +817,10 @@ export default function Home() {
         console.error("棋局计算失败", error);
         setEngineError("棋局计算遇到问题，请重新开局");
       } finally {
-        if (!cancelled) setAiThinking(false);
+        if (!cancelled) {
+          setAiThinking(false);
+          setNnueDownload(null);
+        }
       }
     }, 20);
     return () => {
@@ -1077,6 +1084,8 @@ export default function Home() {
           timeMs: searchBudget,
           start: startRef.current,
           deterministic: true,
+          // 提示是用户主动请求，允许下载 NNUE 以获得最强着法
+          allowPikafish: true,
         }, searchBudget, () => setPikafishReady(true), undefined, controller.signal);
         if (hintRequestRef.current !== requestId) return;
         if (!move) {
@@ -1178,7 +1187,11 @@ export default function Home() {
       <div className={`player-strip${top ? " player-strip-top" : ""}`}>
         <span className={`player-mark ${isRed ? "red-mark" : "black-mark"}${thinking ? " thinking-mark" : ""}`}>{isRed ? "帥" : "将"}</span>
         <span className="player-copy">
-          <b>{name}{thinking ? <span className="thinking-inline">思考中<span className="status-loading" aria-hidden="true"><i /><i /><i /></span></span> : null}</b>
+          <b>{name}{thinking ? (
+            nnueDownload && nnueDownload.total > 0
+              ? <span className="thinking-inline">下载神经网络 {Math.round((nnueDownload.loaded / nnueDownload.total) * 100)}%</span>
+              : <span className="thinking-inline">思考中<span className="status-loading" aria-hidden="true"><i /><i /><i /></span></span>
+          ) : null}</b>
           <small className={thinking ? "thinking-note" : undefined}>{note}</small>
         </span>
         <span className="clock-copy"><small>剩余</small><time key={clockUrgent ? times[side] : "steady"} className={clockClass}>{formatTime(times[side])}</time></span>

@@ -1,6 +1,6 @@
 import { aiBestMove } from "./chess";
 import type { AiDifficulty, AiOptions, AiSearchProgress, Board } from "./chess";
-import { disposePikafish, pikafishAnalyze } from "./pikafish";
+import { disposePikafish, pikafishAnalyze, setNnueDownloadProgressHandler } from "./pikafish";
 import type { PikafishCandidate } from "./pikafish";
 
 export type AiLevel = AiDifficulty | "master" | "grandmaster";
@@ -212,7 +212,20 @@ export interface LevelAnalysisOptions extends Omit<AiOptions, "difficulty"> {
   deterministic?: boolean;
   /** 强制使用内置引擎（它会自行排除长将/长捉禁着）。 */
   forceBuiltin?: boolean;
+  /**
+   * 允许本次请求使用 Pikafish（可能触发约 51MB NNUE 下载）。
+   * 不传时仅 master / grandmaster 档位使用 Pikafish，低档位直接用内置引擎。
+   */
+  allowPikafish?: boolean;
+  /** NNUE 下载进度回调（loaded/total 字节，仅首次下载时触发）。 */
+  onNnueDownloadProgress?: (loaded: number, total: number) => void;
 }
+
+/**
+ * 需要 Pikafish 引擎的难度档位。低档位用内置引擎即可，
+ * 避免用户在不需要时下载约 51MB 的神经网络文件。
+ */
+const PIKAFISH_LEVELS: ReadonlySet<AiLevel> = new Set(["master", "grandmaster"]);
 
 export async function analyzeAtLevel(
   board: Board,
@@ -224,7 +237,7 @@ export async function analyzeAtLevel(
   signal?: AbortSignal,
 ) {
   const plan = LEVEL_PLAN[level];
-  const { deterministic, forceBuiltin, ...searchOptions } = options;
+  const { deterministic, forceBuiltin, allowPikafish, onNnueDownloadProgress, ...searchOptions } = options;
   const builtin = () => analyzeMove(
     board,
     { ...searchOptions, difficulty: plan.fallback, timeMs: Math.min(searchOptions.timeMs ?? 800, plan.fallback === "hard" ? 800 : 400) },
@@ -232,6 +245,9 @@ export async function analyzeAtLevel(
     signal,
   );
   if (forceBuiltin) return builtin();
+  // 延迟加载：低难度档位不触发约 51MB NNUE 下载，直接使用内置引擎。
+  if (!(allowPikafish ?? PIKAFISH_LEVELS.has(level))) return builtin();
+  if (onNnueDownloadProgress) setNnueDownloadProgressHandler(onNnueDownloadProgress);
   try {
     const result = await pikafishAnalyze(
       board,
@@ -255,6 +271,8 @@ export async function analyzeAtLevel(
     if (isAbortError(error)) throw error;
     console.warn("Pikafish 引擎不可用，已切换为内置引擎。", error);
     return builtin();
+  } finally {
+    if (onNnueDownloadProgress) setNnueDownloadProgressHandler(null);
   }
 }
 
